@@ -147,7 +147,7 @@ class PassKitSyncCommand extends Command
         }
 
         if (!empty($result['errors'])) {
-            $this->warn("⚠️ Encountered {count($result['errors'])} errors:");
+            $this->warn("⚠️ Encountered " . count($result['errors']) . " errors:");
             foreach (array_slice($result['errors'], 0, 5) as $error) {
                 $this->line("  • {$error}");
             }
