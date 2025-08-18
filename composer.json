@@ -23,7 +23,7 @@
         "illuminate/support": "^10.0|^11.0|^12.0",
         "illuminate/database": "^10.0|^11.0|^12.0",
         "illuminate/http": "^10.0|^11.0|^12.0",
-        "google/protobuf": "^3.24",
+        "google/protobuf": "^3.24|^4.0",
         "grpc/grpc": "^1.50",
         "spiral/roadrunner-grpc": "^3.0"
     },
