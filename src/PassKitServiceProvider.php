@@ -114,8 +114,7 @@ class PassKitServiceProvider extends ServiceProvider
             ->appendOutputTo(storage_path('logs/passkit-program-sync.log'));
 
         $schedule->command('passkit:sync --type=templates')
-            ->everySixHours()
-            ->at('30') // Offset by 30 minutes from programs
+            ->cron('30 */6 * * *') // Every 6 hours, offset by 30 minutes from programs
             ->withoutOverlapping(20)
             ->runInBackground()
             ->onOneServer()
