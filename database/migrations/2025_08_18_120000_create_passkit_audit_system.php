@@ -4,7 +4,7 @@ use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
-class CreatePasskitAuditSystem extends Migration
+return new class extends Migration
 {
     /**
      * Run the migrations.
@@ -311,4 +311,4 @@ class CreatePasskitAuditSystem extends Migration
         Schema::dropIfExists('passkit_security_logs');
         Schema::dropIfExists('passkit_audit_logs');
     }
-}
+};

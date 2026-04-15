@@ -3,22 +3,13 @@
 namespace ShakewellAgency\PassKitLaravel\Services;
 
 use ShakewellAgency\PassKitLaravel\Models\PassKitProgram;
-use ShakewellAgency\PassKitLaravel\Models\PassKitTier;
-use ShakewellAgency\PassKitLaravel\Models\CardTemplate;
+use ShakewellAgency\PassKitLaravel\Models\PassKitMember;
+use ShakewellAgency\PassKitLaravel\Models\PassKitTransaction;
 use ShakewellAgency\PassKitLaravel\Models\WalletPass;
-use App\Models\User;
-use App\Models\Account;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Facades\DB;
 
-/**
- * PassKit CRUD Management Service
- * Comprehensive service container for all PassKit operations
- * 
- * @author Claude Code with PassKit Integration
- * @version 1.0.0
- */
 class PassKitCrudManager
 {
     protected PassKitService $passKitService;
@@ -28,609 +19,362 @@ class PassKitCrudManager
         $this->passKitService = $passKitService;
     }
 
-    // ==========================================
-    // PROGRAM MANAGEMENT (CREATE, READ, UPDATE, DELETE)
-    // ==========================================
-
-    /**
-     * Create a new PassKit program
-     */
-    public function createProgram(string $type, array $data, int $accountId): array
+    // Programs
+    public function createProgram(array $data): PassKitProgram
     {
-        try {
-            DB::beginTransaction();
-
-            $result = match($type) {
-                'membership' => $this->passKitService->createMembershipProgram($data),
-                'event_ticket' => $this->passKitService->createEventTicketProgram($data),
-                'coupon' => $this->passKitService->createCouponProgram($data),
-                default => throw new \InvalidArgumentException("Invalid program type: {$type}")
-            };
-
-            if (!$result['success']) {
-                throw new \Exception('Program creation failed');
-            }
-
-            // Update database record with account association
-            $program = PassKitProgram::where('passkit_id', $result['id'])->first();
-            if ($program) {
-                $program->update(['account_id' => $accountId]);
-            }
-
-            DB::commit();
-
-            Log::info('PassKit program created via CRUD manager', [
-                'type' => $type,
-                'passkit_id' => $result['id'],
-                'account_id' => $accountId
-            ]);
-
-            return [
-                'success' => true,
-                'program' => $program,
-                'passkit_result' => $result
-            ];
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('PassKit program creation failed', [
-                'type' => $type,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
+        return PassKitProgram::create($this->withProgramDefaults($data));
     }
 
-    /**
-     * Get program by ID
-     */
-    public function getProgram(int $programId): ?PassKitProgram
+    public function updateProgram(int $id, array $data): ?PassKitProgram
     {
-        return PassKitProgram::with(['tiers', 'account'])->find($programId);
-    }
-
-    /**
-     * Get programs by account
-     */
-    public function getProgramsByAccount(int $accountId, string $type = null): Collection
-    {
-        $query = PassKitProgram::where('account_id', $accountId)->with(['tiers']);
-        
-        if ($type) {
-            $query->where('program_type', $type);
-        }
-
-        return $query->orderBy('created_at', 'desc')->get();
-    }
-
-    /**
-     * Update program
-     */
-    public function updateProgram(int $programId, array $data): array
-    {
-        try {
-            $program = $this->getProgram($programId);
-            if (!$program) {
-                throw new \Exception("Program not found: {$programId}");
-            }
-
-            // Update local record
-            $program->update([
-                'name' => $data['name'] ?? $program->name,
-                'description' => $data['description'] ?? $program->description,
-                'status' => $data['status'] ?? $program->status,
-                'metadata' => array_merge($program->metadata ?? [], $data['metadata'] ?? [])
-            ]);
-
-            Log::info('PassKit program updated', [
-                'program_id' => $programId,
-                'passkit_id' => $program->passkit_id
-            ]);
-
-            return [
-                'success' => true,
-                'program' => $program->fresh()
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('PassKit program update failed', [
-                'program_id' => $programId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Delete program
-     */
-    public function deleteProgram(int $programId): bool
-    {
-        try {
-            $program = $this->getProgram($programId);
-            if (!$program) {
-                throw new \Exception("Program not found: {$programId}");
-            }
-
-            // Soft delete or mark as inactive
-            $program->update(['status' => 'inactive']);
-
-            Log::info('PassKit program deleted', [
-                'program_id' => $programId,
-                'passkit_id' => $program->passkit_id
-            ]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            Log::error('PassKit program deletion failed', [
-                'program_id' => $programId,
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
-    }
-
-    // ==========================================
-    // TIER MANAGEMENT (CREATE, READ, UPDATE, DELETE)
-    // ==========================================
-
-    /**
-     * Create a new tier
-     */
-    public function createTier(int $programId, array $data): array
-    {
-        try {
-            $program = $this->getProgram($programId);
-            if (!$program) {
-                throw new \Exception("Program not found: {$programId}");
-            }
-
-            $result = $this->passKitService->createMembershipTier(array_merge($data, [
-                'program_id' => $program->passkit_id
-            ]));
-
-            Log::info('PassKit tier created via CRUD manager', [
-                'program_id' => $programId,
-                'tier_id' => $result['id']
-            ]);
-
-            return [
-                'success' => true,
-                'tier' => PassKitTier::where('passkit_id', $result['id'])->first(),
-                'passkit_result' => $result
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('PassKit tier creation failed', [
-                'program_id' => $programId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Get tier by ID
-     */
-    public function getTier(int $tierId): ?PassKitTier
-    {
-        return PassKitTier::with(['program'])->find($tierId);
-    }
-
-    /**
-     * Get tiers by program
-     */
-    public function getTiersByProgram(int $programId): Collection
-    {
-        return PassKitTier::whereHas('program', function($query) use ($programId) {
-            $query->where('id', $programId);
-        })->orderBy('created_at', 'desc')->get();
-    }
-
-    /**
-     * Update tier
-     */
-    public function updateTier(int $tierId, array $data): array
-    {
-        try {
-            $tier = $this->getTier($tierId);
-            if (!$tier) {
-                throw new \Exception("Tier not found: {$tierId}");
-            }
-
-            $tier->update([
-                'name' => $data['name'] ?? $tier->name,
-                'description' => $data['description'] ?? $tier->description,
-                'template_id' => $data['template_id'] ?? $tier->template_id,
-                'metadata' => array_merge($tier->metadata ?? [], $data['metadata'] ?? [])
-            ]);
-
-            return [
-                'success' => true,
-                'tier' => $tier->fresh()
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('PassKit tier update failed', [
-                'tier_id' => $tierId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Delete tier
-     */
-    public function deleteTier(int $tierId): bool
-    {
-        try {
-            $tier = $this->getTier($tierId);
-            if (!$tier) {
-                throw new \Exception("Tier not found: {$tierId}");
-            }
-
-            $tier->delete();
-
-            Log::info('PassKit tier deleted', [
-                'tier_id' => $tierId,
-                'passkit_id' => $tier->passkit_id
-            ]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            Log::error('PassKit tier deletion failed', [
-                'tier_id' => $tierId,
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
-    }
-
-    // ==========================================
-    // MEMBER MANAGEMENT (CREATE, READ, UPDATE, DELETE)
-    // ==========================================
-
-    /**
-     * Create/Enroll a new member
-     */
-    public function createMember(string $tierId, array $memberData, int $userId, int $accountId): array
-    {
-        try {
-            $result = $this->passKitService->enrollMemberWithWalletPass(
-                $tierId,
-                $memberData,
-                $userId,
-                $accountId
-            );
-
-            Log::info('PassKit member created via CRUD manager', [
-                'member_id' => $result['member_id'],
-                'user_id' => $userId,
-                'account_id' => $accountId
-            ]);
-
-            return $result;
-
-        } catch (\Exception $e) {
-            Log::error('PassKit member creation failed', [
-                'tier_id' => $tierId,
-                'user_id' => $userId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Get member by PassKit ID
-     */
-    public function getMember(string $memberId): ?array
-    {
-        try {
-            return $this->passKitService->getMember($memberId);
-        } catch (\Exception $e) {
-            Log::error('PassKit member retrieval failed', [
-                'member_id' => $memberId,
-                'error' => $e->getMessage()
-            ]);
+        $program = PassKitProgram::find($id);
+        if ($program === null) {
             return null;
         }
+        $program->update($data);
+        return $program->fresh();
+    }
+
+    public function deleteProgram(int $id): bool
+    {
+        $program = PassKitProgram::find($id);
+        return $program !== null && $program->delete();
+    }
+
+    public function getProgram(int $id): ?PassKitProgram
+    {
+        return PassKitProgram::find($id);
     }
 
     /**
-     * Get wallet pass by member ID
+     * @return Collection<int, PassKitProgram>|LengthAwarePaginator
      */
-    public function getWalletPass(string $memberId): ?WalletPass
+    public function listPrograms(int $accountId, array $options = [])
     {
-        return WalletPass::where('passkit_id', $memberId)->with(['user', 'account'])->first();
+        $query = PassKitProgram::byAccount($accountId);
+
+        if (isset($options['status'])) {
+            $query->where('status', $options['status']);
+        }
+
+        if (isset($options['per_page'])) {
+            return $query->paginate((int) $options['per_page']);
+        }
+
+        return $query->get();
+    }
+
+    // Members
+    public function createMember(array $data): PassKitMember
+    {
+        $this->validateMemberData($data);
+        return PassKitMember::create($this->withMemberDefaults($data));
+    }
+
+    public function updateMember(int $id, array $data): ?PassKitMember
+    {
+        $member = PassKitMember::find($id);
+        if ($member === null) {
+            return null;
+        }
+        $member->update($data);
+        return $member->fresh();
+    }
+
+    public function deleteMember(int $id): bool
+    {
+        $member = PassKitMember::find($id);
+        return $member !== null && $member->delete();
+    }
+
+    public function getMember(int $id): ?PassKitMember
+    {
+        return PassKitMember::find($id);
+    }
+
+    public function findMemberByPassKitId(string $passkitId): ?PassKitMember
+    {
+        return PassKitMember::where('passkit_id', $passkitId)->first();
+    }
+
+    public function findMemberByExternalId(string $externalId, int $accountId): ?PassKitMember
+    {
+        return PassKitMember::where('external_id', $externalId)
+            ->where('account_id', $accountId)
+            ->first();
     }
 
     /**
-     * Get wallet passes by user
+     * @return Collection<int, PassKitMember>|LengthAwarePaginator
      */
-    public function getWalletPassesByUser(int $userId): Collection
+    public function listMembers(int $accountId, array $options = [])
     {
-        return WalletPass::where('user_id', $userId)->with(['account'])->orderBy('created_at', 'desc')->get();
-    }
+        $query = PassKitMember::byAccount($accountId);
 
-    /**
-     * Get wallet passes by account
-     */
-    public function getWalletPassesByAccount(int $accountId): Collection
-    {
-        return WalletPass::where('account_id', $accountId)->with(['user'])->orderBy('created_at', 'desc')->get();
-    }
-
-    /**
-     * Update member points
-     */
-    public function updateMemberPoints(string $memberId, int $points, string $description = null): array
-    {
-        try {
-            $result = $this->passKitService->updateMemberPoints($memberId, $points, $description);
-
-            // Update local wallet pass
-            $walletPass = $this->getWalletPass($memberId);
-            if ($walletPass) {
-                $currentData = $walletPass->pass_data;
-                $currentData['points'] = ($currentData['points'] ?? 0) + $points;
-                $walletPass->update(['pass_data' => $currentData]);
+        foreach (['status', 'program_id', 'tier_id'] as $key) {
+            if (isset($options[$key])) {
+                $query->where($key, $options[$key]);
             }
-
-            Log::info('PassKit member points updated via CRUD manager', [
-                'member_id' => $memberId,
-                'points_added' => $points
-            ]);
-
-            return [
-                'success' => true,
-                'member_id' => $memberId,
-                'points_added' => $points,
-                'wallet_pass' => $walletPass
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('PassKit member points update failed', [
-                'member_id' => $memberId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
         }
-    }
 
-    /**
-     * Delete member
-     */
-    public function deleteMember(string $memberId): bool
-    {
-        try {
-            $result = $this->passKitService->deleteMember($memberId);
-
-            // Update local wallet pass
-            $walletPass = $this->getWalletPass($memberId);
-            if ($walletPass) {
-                $walletPass->update(['status' => 'inactive']);
-            }
-
-            Log::info('PassKit member deleted via CRUD manager', [
-                'member_id' => $memberId
-            ]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            Log::error('PassKit member deletion failed', [
-                'member_id' => $memberId,
-                'error' => $e->getMessage()
-            ]);
-            return false;
+        if (isset($options['per_page'])) {
+            return $query->paginate((int) $options['per_page']);
         }
+
+        return $query->get();
     }
 
-    // ==========================================
-    // TEMPLATE MANAGEMENT (CREATE, READ, UPDATE, DELETE)
-    // ==========================================
-
-    /**
-     * Create template
-     */
-    public function createTemplate(string $type, string $tierId, array $data): array
+    public function searchMembers(string $term, int $accountId): Collection
     {
-        try {
-            $result = match($type) {
-                'membership' => $this->passKitService->createPassTemplate($tierId, $data),
-                'event_ticket' => $this->passKitService->createEventTicketTemplate($tierId, $data),
-                'coupon' => $this->passKitService->createCouponTemplate($tierId, $data),
-                default => throw new \InvalidArgumentException("Invalid template type: {$type}")
-            };
-
-            Log::info('PassKit template created via CRUD manager', [
-                'type' => $type,
-                'tier_id' => $tierId,
-                'template_id' => $result['id'] ?? 'unknown'
-            ]);
-
-            return [
-                'success' => true,
-                'template' => CardTemplate::where('passkit_template_id', $result['id'] ?? null)->first(),
-                'passkit_result' => $result
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('PassKit template creation failed', [
-                'type' => $type,
-                'tier_id' => $tierId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Get template by ID
-     */
-    public function getTemplate(int $templateId): ?CardTemplate
-    {
-        return CardTemplate::with(['account'])->find($templateId);
-    }
-
-    /**
-     * Get templates by account
-     */
-    public function getTemplatesByAccount(int $accountId): Collection
-    {
-        return CardTemplate::where('account_id', $accountId)
-            ->whereNotNull('passkit_template_id')
-            ->orderBy('created_at', 'desc')
+        return PassKitMember::byAccount($accountId)
+            ->where(function ($query) use ($term) {
+                $query->where('email', 'like', "%{$term}%")
+                    ->orWhere('first_name', 'like', "%{$term}%")
+                    ->orWhere('last_name', 'like', "%{$term}%")
+                    ->orWhere('external_id', 'like', "%{$term}%");
+            })
             ->get();
     }
 
-    /**
-     * Update template
-     */
-    public function updateTemplate(int $templateId, array $data): array
+    public function getMemberStatistics(int $accountId): array
     {
-        try {
-            $template = $this->getTemplate($templateId);
-            if (!$template) {
-                throw new \Exception("Template not found: {$templateId}");
-            }
+        $base = PassKitMember::byAccount($accountId);
 
-            $template->update([
-                'name' => $data['name'] ?? $template->name,
-                'description' => $data['description'] ?? $template->description,
-                'template_data' => array_merge($template->template_data ?? [], $data['template_data'] ?? []),
-                'field_definitions' => array_merge($template->field_definitions ?? [], $data['field_definitions'] ?? [])
-            ]);
-
-            return [
-                'success' => true,
-                'template' => $template->fresh()
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('PassKit template update failed', [
-                'template_id' => $templateId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Delete template
-     */
-    public function deleteTemplate(int $templateId): bool
-    {
-        try {
-            $template = $this->getTemplate($templateId);
-            if (!$template) {
-                throw new \Exception("Template not found: {$templateId}");
-            }
-
-            $template->update(['is_active' => false]);
-
-            Log::info('PassKit template deleted', [
-                'template_id' => $templateId,
-                'passkit_template_id' => $template->passkit_template_id
-            ]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            Log::error('PassKit template deletion failed', [
-                'template_id' => $templateId,
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
-    }
-
-    // ==========================================
-    // UTILITY METHODS
-    // ==========================================
-
-    /**
-     * Get installation package for member
-     */
-    public function getInstallationPackage(string $memberId): array
-    {
-        try {
-            return $this->passKitService->getPassInstallationPackage($memberId);
-        } catch (\Exception $e) {
-            Log::error('Installation package retrieval failed', [
-                'member_id' => $memberId,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Send notification to member
-     */
-    public function sendNotification(string $memberId, string $message, int $points = 0): bool
-    {
-        try {
-            return $this->passKitService->sendPushNotification($memberId, $message, $points);
-        } catch (\Exception $e) {
-            Log::error('Notification sending failed', [
-                'member_id' => $memberId,
-                'error' => $e->getMessage()
-            ]);
-            return false;
-        }
-    }
-
-    /**
-     * Get system statistics
-     */
-    public function getSystemStats(): array
-    {
         return [
-            'programs' => [
-                'total' => PassKitProgram::count(),
-                'by_type' => PassKitProgram::selectRaw('program_type, COUNT(*) as count')
-                    ->groupBy('program_type')
-                    ->pluck('count', 'program_type')
-                    ->toArray()
-            ],
-            'tiers' => PassKitTier::count(),
-            'templates' => CardTemplate::whereNotNull('passkit_template_id')->count(),
-            'wallet_passes' => [
-                'total' => WalletPass::count(),
-                'active' => WalletPass::where('status', 'active')->count(),
-                'installed' => WalletPass::where('is_installed', true)->count()
-            ],
-            'total_points' => WalletPass::sum(DB::raw("JSON_EXTRACT(pass_data, '$.points')")) ?? 0
+            'total' => (clone $base)->count(),
+            'active' => (clone $base)->where('status', 'active')->count(),
+            'inactive' => (clone $base)->where('status', 'inactive')->count(),
         ];
     }
 
+    public function batchCreateMembers(array $members): Collection
+    {
+        return DB::transaction(function () use ($members) {
+            $created = new Collection();
+            foreach ($members as $data) {
+                $created->push($this->createMember($data));
+            }
+            return $created;
+        });
+    }
+
+    public function batchUpdateMemberPoints(array $updates): bool
+    {
+        return DB::transaction(function () use ($updates) {
+            foreach ($updates as $update) {
+                if (!isset($update['id'])) {
+                    continue;
+                }
+                PassKitMember::where('id', $update['id'])
+                    ->update(['points_balance' => $update['points_balance'] ?? 0]);
+            }
+            return true;
+        });
+    }
+
+    // Transactions
+    public function createTransaction(array $data): PassKitTransaction
+    {
+        return PassKitTransaction::create($this->withTransactionDefaults($data));
+    }
+
+    public function updateTransaction(int $id, array $data): ?PassKitTransaction
+    {
+        $transaction = PassKitTransaction::find($id);
+        if ($transaction === null) {
+            return null;
+        }
+        $transaction->update($data);
+        return $transaction->fresh();
+    }
+
+    public function deleteTransaction(int $id): bool
+    {
+        $transaction = PassKitTransaction::find($id);
+        return $transaction !== null && $transaction->delete();
+    }
+
+    public function getTransaction(int $id): ?PassKitTransaction
+    {
+        return PassKitTransaction::find($id);
+    }
+
     /**
-     * Health check
+     * @return Collection<int, PassKitTransaction>|LengthAwarePaginator
      */
+    public function listTransactions(array $filters = [])
+    {
+        $query = PassKitTransaction::query();
+
+        foreach (['member_id', 'member_passkit_id', 'account_id', 'transaction_type', 'status'] as $key) {
+            if (isset($filters[$key])) {
+                $query->where($key, $filters[$key]);
+            }
+        }
+
+        if (isset($filters['per_page'])) {
+            return $query->paginate((int) $filters['per_page']);
+        }
+
+        return $query->get();
+    }
+
+    public function getTransactionStatistics(int $accountId): array
+    {
+        $base = PassKitTransaction::byAccount($accountId);
+
+        return [
+            'total_transactions' => (clone $base)->count(),
+            'total_earned' => (int) (clone $base)->where('transaction_type', 'earn')->sum('points_amount'),
+            'total_spent' => (int) abs((clone $base)->where('transaction_type', 'burn')->sum('points_amount')),
+        ];
+    }
+
+    public function batchCreateTransactions(array $transactions): Collection
+    {
+        return DB::transaction(function () use ($transactions) {
+            $created = new Collection();
+            foreach ($transactions as $data) {
+                $created->push($this->createTransaction($data));
+            }
+            return $created;
+        });
+    }
+
+    // Wallet passes
+    public function createWalletPass(array $data): WalletPass
+    {
+        return WalletPass::create($this->withWalletPassDefaults($data));
+    }
+
+    public function updateWalletPass(int $id, array $data): ?WalletPass
+    {
+        $pass = WalletPass::find($id);
+        if ($pass === null) {
+            return null;
+        }
+        $pass->update($data);
+        return $pass->fresh();
+    }
+
+    public function deleteWalletPass(int $id): bool
+    {
+        $pass = WalletPass::find($id);
+        return $pass !== null && $pass->delete();
+    }
+
+    public function getWalletPass(int $id): ?WalletPass
+    {
+        return WalletPass::find($id);
+    }
+
+    /**
+     * @return Collection<int, WalletPass>|LengthAwarePaginator
+     */
+    public function listWalletPasses(array $filters = [])
+    {
+        $query = WalletPass::query();
+
+        foreach (['user_id', 'account_id', 'status', 'program_id', 'template_id', 'member_passkit_id'] as $key) {
+            if (isset($filters[$key])) {
+                $query->where($key, $filters[$key]);
+            }
+        }
+
+        if (isset($filters['per_page'])) {
+            return $query->paginate((int) $filters['per_page']);
+        }
+
+        return $query->get();
+    }
+
+    // System helpers
+    public function getSystemStats(int $accountId = null): array
+    {
+        $programs = PassKitProgram::query();
+        $members = PassKitMember::query();
+        $passes = WalletPass::query();
+        $transactions = PassKitTransaction::query();
+
+        if ($accountId !== null) {
+            $programs->where('account_id', $accountId);
+            $members->where('account_id', $accountId);
+            $passes->where('account_id', $accountId);
+            $transactions->where('account_id', $accountId);
+        }
+
+        return [
+            'programs' => $programs->count(),
+            'members' => $members->count(),
+            'wallet_passes' => $passes->count(),
+            'transactions' => $transactions->count(),
+        ];
+    }
+
     public function healthCheck(): array
     {
         try {
-            $connection = $this->passKitService->testConnection();
-            $dbCheck = DB::table('pass_kit_programs')->count() >= 0;
-
-            return [
-                'passkit_api' => $connection,
-                'database' => $dbCheck,
-                'overall' => $connection && $dbCheck
-            ];
-
-        } catch (\Exception $e) {
-            return [
-                'passkit_api' => false,
-                'database' => false,
-                'overall' => false,
-                'error' => $e->getMessage()
-            ];
+            DB::connection()->getPdo();
+            $dbOk = true;
+        } catch (\Throwable $e) {
+            $dbOk = false;
         }
+
+        return [
+            'database' => $dbOk ? 'ok' : 'error',
+            'passkit' => $this->passKitService ? 'configured' : 'missing',
+            'timestamp' => now()->toISOString(),
+        ];
+    }
+
+    protected function validateMemberData(array $data): void
+    {
+        if (isset($data['email']) && filter_var($data['email'], FILTER_VALIDATE_EMAIL) === false) {
+            throw new \InvalidArgumentException('Member email must be a valid email address.');
+        }
+
+        if (isset($data['points_balance']) && !is_numeric($data['points_balance'])) {
+            throw new \InvalidArgumentException('Member points_balance must be numeric.');
+        }
+    }
+
+    protected function withProgramDefaults(array $data): array
+    {
+        return array_merge([
+            'passkit_id' => $data['passkit_id'] ?? 'program_' . uniqid(),
+            'status' => 'active',
+        ], $data);
+    }
+
+    protected function withMemberDefaults(array $data): array
+    {
+        return array_merge([
+            'passkit_id' => $data['passkit_id'] ?? 'member_' . uniqid(),
+            'status' => 'active',
+            'points_balance' => 0,
+            'enrolled_at' => now(),
+            'program_id' => 0,
+        ], $data);
+    }
+
+    protected function withTransactionDefaults(array $data): array
+    {
+        return array_merge([
+            'passkit_transaction_id' => $data['passkit_transaction_id'] ?? 'txn_' . uniqid(),
+            'status' => 'completed',
+            'processed_at' => now(),
+            'account_id' => 1,
+            'points_balance_before' => 0,
+            'points_balance_after' => 0,
+        ], $data);
+    }
+
+    protected function withWalletPassDefaults(array $data): array
+    {
+        return array_merge([
+            'passkit_id' => $data['passkit_id'] ?? 'pass_' . uniqid(),
+            'status' => 'active',
+            'issued_at' => now(),
+        ], $data);
     }
 }

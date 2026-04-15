@@ -10,6 +10,8 @@ class PassKitDataChange extends Model
 {
     use HasFactory;
 
+    protected $table = 'passkit_data_changes';
+
     protected $fillable = [
         'audit_log_id',
         'account_id',

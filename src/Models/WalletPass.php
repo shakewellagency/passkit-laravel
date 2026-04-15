@@ -138,10 +138,25 @@ class WalletPass extends Model
         return $query->where('sync_pending', true);
     }
 
+    public function scopeByMember($query, $memberPasskitId)
+    {
+        return $query->where('member_passkit_id', $memberPasskitId);
+    }
+
     // Accessors
+    public function getIsActiveAttribute(): bool
+    {
+        return $this->status === 'active';
+    }
+
     public function getIsExpiredAttribute(): bool
     {
         return $this->expires_at && $this->expires_at->isPast();
+    }
+
+    public function getCurrentTierAttribute(): ?string
+    {
+        return $this->pass_data['tier'] ?? null;
     }
 
     public function getIsVoidedAttribute(): bool
@@ -172,12 +187,30 @@ class WalletPass extends Model
         if (!$this->expires_at) {
             return null;
         }
-        
-        return now()->diffInDays($this->expires_at, false);
+
+        return (int) round(now()->diffInDays($this->expires_at, false));
     }
 
     // Methods
-    public function markAsInstalled(array $deviceInfo = []): void
+    public function activate(): void
+    {
+        $this->status = 'active';
+        $this->save();
+    }
+
+    public function deactivate(): void
+    {
+        $this->status = 'inactive';
+        $this->save();
+    }
+
+    public function suspend(): void
+    {
+        $this->status = 'suspended';
+        $this->save();
+    }
+
+    public function markAsInstalled($deviceTypeOrInfo = [], ?string $deviceModel = null): void
     {
         $updateData = [
             'is_installed' => true,
@@ -188,17 +221,17 @@ class WalletPass extends Model
             $updateData['first_install_at'] = now();
         }
 
-        // Update device information if provided
-        if (isset($deviceInfo['device_library_identifier'])) {
-            $updateData['device_library_identifier'] = $deviceInfo['device_library_identifier'];
-        }
-        
-        if (isset($deviceInfo['push_token'])) {
-            $updateData['push_token'] = $deviceInfo['push_token'];
-        }
-        
-        if (isset($deviceInfo['device_type'])) {
-            $updateData['device_type'] = $deviceInfo['device_type'];
+        if (is_string($deviceTypeOrInfo)) {
+            $updateData['device_type'] = $deviceTypeOrInfo;
+            if ($deviceModel !== null) {
+                $updateData['device_model'] = $deviceModel;
+            }
+        } else {
+            foreach (['device_library_identifier', 'push_token', 'device_type', 'device_model'] as $key) {
+                if (isset($deviceTypeOrInfo[$key])) {
+                    $updateData[$key] = $deviceTypeOrInfo[$key];
+                }
+            }
         }
 
         $this->update($updateData);
@@ -210,9 +243,37 @@ class WalletPass extends Model
         $this->update(['last_viewed_at' => now()]);
     }
 
+    public function recordView(): void
+    {
+        $this->markAsViewed();
+    }
+
     public function markAsShared(): void
     {
         $this->increment('share_count');
+    }
+
+    public function recordShare(): void
+    {
+        $this->markAsShared();
+    }
+
+    public function incrementUpdateCount(): void
+    {
+        $this->increment('update_count');
+    }
+
+    public function setSyncPending(): void
+    {
+        $this->update(['sync_pending' => true]);
+    }
+
+    public function clearSyncPending(): void
+    {
+        $this->update([
+            'sync_pending' => false,
+            'last_sync_at' => now(),
+        ]);
     }
 
     public function updatePassData(array $newData): void

@@ -10,6 +10,8 @@ class PassKitComplianceLog extends Model
 {
     use HasFactory;
 
+    protected $table = 'passkit_compliance_logs';
+
     protected $fillable = [
         'audit_log_id',
         'account_id',

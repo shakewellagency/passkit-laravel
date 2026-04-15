@@ -250,8 +250,8 @@ Configure QR code generation:
 
 ## Requirements
 
-- PHP 8.1+
-- Laravel 10.0+ or 11.0+
+- PHP 8.2+
+- Laravel 12.x or 13.x (older Laravel versions are past security support)
 - gRPC PHP extension
 - PassKit API credentials
 
@@ -267,10 +267,4 @@ Developed by [Shakewell Agency](https://shakewell.agency)
 
 ## Changelog
 
-### v1.0.0
-- Initial release
-- Complete PassKit gRPC integration
-- CRUD management system
-- RESTful API endpoints
-- Comprehensive testing suite
-- Production-ready security
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.

@@ -49,10 +49,10 @@ class PassKitTransaction extends Model
         'points_amount' => 'integer',
         'points_balance_before' => 'integer',
         'points_balance_after' => 'integer',
-        'purchase_amount' => 'decimal:2',
-        'points_multiplier' => 'decimal:2',
-        'latitude' => 'decimal:8',
-        'longitude' => 'decimal:8',
+        'purchase_amount' => 'float',
+        'points_multiplier' => 'float',
+        'latitude' => 'float',
+        'longitude' => 'float',
         'expires_at' => 'datetime',
         'expired_at' => 'datetime',
         'processed_at' => 'datetime',
@@ -93,9 +93,34 @@ class PassKitTransaction extends Model
         return $query->where('account_id', $accountId);
     }
 
-    public function scopeByMember($query, $memberId)
+    public function scopeByMember($query, $memberPasskitId)
     {
-        return $query->where('member_id', $memberId);
+        return $query->where('member_passkit_id', $memberPasskitId);
+    }
+
+    public function scopeCreatedAfter($query, $date)
+    {
+        return $query->where('created_at', '>=', $date);
+    }
+
+    public function scopePending($query)
+    {
+        return $query->where('status', 'pending');
+    }
+
+    public function scopeFailed($query)
+    {
+        return $query->where('status', 'failed');
+    }
+
+    public function scopePointsBetween($query, int $min, int $max)
+    {
+        return $query->whereBetween('points_amount', [$min, $max]);
+    }
+
+    public function scopeExpired($query)
+    {
+        return $query->where('is_expired', true);
     }
 
     public function scopeEarned($query)
@@ -145,44 +170,79 @@ class PassKitTransaction extends Model
         if (!$this->purchase_amount) {
             return null;
         }
-        
+
         return ($this->currency ?? 'USD') . ' ' . number_format($this->purchase_amount, 2);
     }
 
-    // Methods
-    public function reverse(string $reason = null): self
+    public function getIsEarningAttribute(): bool
     {
-        if ($this->status !== 'completed') {
-            throw new \Exception('Only completed transactions can be reversed');
-        }
+        return $this->transaction_type === 'earn';
+    }
 
-        if ($this->reversal_transaction_id) {
-            throw new \Exception('Transaction has already been reversed');
-        }
+    public function getIsSpendingAttribute(): bool
+    {
+        return $this->transaction_type === 'burn';
+    }
 
-        $reversalTransaction = self::create([
-            'member_passkit_id' => $this->member_passkit_id,
-            'member_id' => $this->member_id,
-            'account_id' => $this->account_id,
-            'transaction_type' => $this->transaction_type === 'earn' ? 'burn' : 'earn',
-            'points_amount' => -$this->points_amount,
-            'points_balance_before' => $this->member->points_balance,
-            'points_balance_after' => $this->member->points_balance - $this->points_amount,
-            'description' => 'Reversal: ' . ($reason ?? $this->description),
-            'reference_id' => $this->reference_id,
-            'source' => $this->source,
-            'category' => 'reversal',
-            'status' => 'completed',
-            'processed_at' => now(),
-            'reversed_by_transaction_id' => $this->id,
-        ]);
+    public function getIsCompletedAttribute(): bool
+    {
+        return $this->status === 'completed';
+    }
 
-        $this->update(['reversal_transaction_id' => $reversalTransaction->id]);
+    public function getIsReversedAttribute(): bool
+    {
+        return $this->status === 'reversed' || $this->reversed_by_transaction_id !== null;
+    }
 
-        // Update member points balance
-        $this->member->decrement('points_balance', $this->points_amount);
+    // Methods
+    public function complete(): void
+    {
+        $this->status = 'completed';
+        $this->processed_at = $this->processed_at ?? now();
+        $this->save();
+    }
 
-        return $reversalTransaction;
+    public function fail(string $reason): void
+    {
+        $this->status = 'failed';
+        $this->failure_reason = $reason;
+        $this->save();
+    }
+
+    public function cancel(): void
+    {
+        $this->status = 'cancelled';
+        $this->save();
+    }
+
+    public function reverse(string $reversalTransactionId): void
+    {
+        $this->status = 'reversed';
+        $this->reversed_by_transaction_id = $reversalTransactionId;
+        $this->save();
+    }
+
+    public function expire(): void
+    {
+        $this->is_expired = true;
+        $this->expired_at = now();
+        $this->save();
+    }
+
+    public function getPointsChange(): int
+    {
+        return (int) $this->points_amount;
+    }
+
+    public static function getTransactionSummary(string $memberPasskitId): array
+    {
+        $transactions = self::byMember($memberPasskitId)->get();
+
+        return [
+            'total_earned' => (int) $transactions->where('transaction_type', 'earn')->sum('points_amount'),
+            'total_spent' => (int) abs($transactions->where('transaction_type', 'burn')->sum('points_amount')),
+            'transaction_count' => $transactions->count(),
+        ];
     }
 
     public function markExpired(): void

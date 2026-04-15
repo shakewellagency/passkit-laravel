@@ -2,652 +2,379 @@
 
 namespace ShakewellAgency\PassKitLaravel\Services;
 
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Collection;
-use ShakewellAgency\PassKitLaravel\Models\PassKitSyncLog;
-use ShakewellAgency\PassKitLaravel\Models\PassKitProgram;
-use ShakewellAgency\PassKitLaravel\Models\PassKitTier;
+use ShakewellAgency\PassKitLaravel\Models\PassKitAuditLog;
 use ShakewellAgency\PassKitLaravel\Models\PassKitMember;
 use ShakewellAgency\PassKitLaravel\Models\PassKitTransaction;
-use ShakewellAgency\PassKitLaravel\Models\CardTemplate;
 use ShakewellAgency\PassKitLaravel\Models\WalletPass;
-use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 
 class PassKitSyncService
 {
     protected PassKitService $passKitService;
-    protected array $syncStats = [];
-    protected ?PassKitSyncLog $currentSyncLog = null;
+    protected ?PassKitCrudManager $crudManager;
 
-    public function __construct(PassKitService $passKitService)
+    public function __construct(PassKitService $passKitService, ?PassKitCrudManager $crudManager = null)
     {
         $this->passKitService = $passKitService;
+        $this->crudManager = $crudManager;
     }
 
-    /**
-     * Perform full synchronization of all PassKit data
-     */
-    public function performFullSync(array $options = []): array
+    public function syncMemberFromApi(string $passkitId, int $accountId, array $options = []): ?PassKitMember
     {
-        $this->initializeSyncLog('full', $options);
-
-        try {
-            $this->logMessage('Starting full synchronization');
-
-            // Sync in dependency order
-            $this->syncPrograms($options);
-            $this->syncTiers($options);
-            $this->syncTemplates($options);
-            $this->syncMembers($options);
-            $this->syncTransactions($options);
-            $this->syncWalletPasses($options);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult();
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Perform incremental synchronization based on last sync timestamp
-     */
-    public function performIncrementalSync(array $options = []): array
-    {
-        $this->initializeSyncLog('incremental', $options);
-
-        try {
-            $lastSync = $this->getLastSuccessfulSync($options['account_id'] ?? null);
-            $since = $lastSync ? $lastSync->completed_at : now()->subDays(7);
-
-            $options['since'] = $since;
-
-            $this->logMessage("Starting incremental sync since {$since}");
-
-            // Sync only changed data
-            $this->syncChangedMembers($options);
-            $this->syncRecentTransactions($options);
-            $this->syncChangedWalletPasses($options);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult();
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Sync programs from PassKit API
-     */
-    public function syncPrograms(array $options = []): array
-    {
-        $this->initializeSyncLog('programs', $options);
-
-        try {
-            $this->logMessage('Syncing programs');
-
-            $programs = $this->passKitService->listPrograms($options);
-            $processed = 0;
-            $successful = 0;
-            $errors = [];
-
-            foreach ($programs as $programData) {
-                try {
-                    $this->syncSingleProgram($programData, $options);
-                    $successful++;
-                } catch (\Exception $e) {
-                    $errors[] = "Program {$programData['id']}: " . $e->getMessage();
-                    Log::error('Program sync failed', [
-                        'program_id' => $programData['id'],
-                        'error' => $e->getMessage()
-                    ]);
-                }
-                $processed++;
-
-                if ($processed % 10 === 0) {
-                    $this->logMessage("Processed {$processed} programs");
-                }
-            }
-
-            $this->updateSyncStats([
-                'total_records' => count($programs),
-                'processed_records' => $processed,
-                'successful_records' => $successful,
-                'failed_records' => count($errors),
-            ]);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult($errors);
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Sync members from PassKit API
-     */
-    public function syncMembers(array $options = []): array
-    {
-        $this->initializeSyncLog('members', $options);
-
-        try {
-            $this->logMessage('Syncing members');
-
-            $chunkSize = $options['chunk_size'] ?? 100;
-            $processed = 0;
-            $successful = 0;
-            $errors = [];
-
-            // Get programs to sync members from
-            $programs = $this->getTargetPrograms($options);
-
-            foreach ($programs as $program) {
-                $this->logMessage("Syncing members for program: {$program->name}");
-
-                $offset = 0;
-                do {
-                    $members = $this->passKitService->listMembers($program->passkit_id, [
-                        'limit' => $chunkSize,
-                        'offset' => $offset,
-                        'since' => $options['since'] ?? null,
-                        'until' => $options['until'] ?? null,
-                    ]);
-
-                    foreach ($members as $memberData) {
-                        try {
-                            if (!$options['dry_run'] ?? false) {
-                                $this->syncSingleMember($memberData, $program, $options);
-                            }
-                            $successful++;
-                        } catch (\Exception $e) {
-                            $errors[] = "Member {$memberData['id']}: " . $e->getMessage();
-                            Log::error('Member sync failed', [
-                                'member_id' => $memberData['id'],
-                                'program_id' => $program->passkit_id,
-                                'error' => $e->getMessage()
-                            ]);
-                        }
-                        $processed++;
-                    }
-
-                    $offset += $chunkSize;
-
-                    if ($processed % 500 === 0) {
-                        $this->logMessage("Processed {$processed} members");
-                    }
-
-                } while (count($members) === $chunkSize);
-            }
-
-            $this->updateSyncStats([
-                'total_records' => $processed,
-                'processed_records' => $processed,
-                'successful_records' => $successful,
-                'failed_records' => count($errors),
-            ]);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult($errors);
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Sync transactions from PassKit API
-     */
-    public function syncTransactions(array $options = []): array
-    {
-        $this->initializeSyncLog('transactions', $options);
-
-        try {
-            $this->logMessage('Syncing transactions');
-
-            $chunkSize = $options['chunk_size'] ?? 100;
-            $processed = 0;
-            $successful = 0;
-            $errors = [];
-
-            // Get members to sync transactions for
-            $members = $this->getTargetMembers($options);
-
-            foreach ($members as $member) {
-                try {
-                    $transactions = $this->passKitService->getMemberTransactions($member->passkit_id, [
-                        'since' => $options['since'] ?? null,
-                        'until' => $options['until'] ?? null,
-                        'limit' => $chunkSize,
-                    ]);
-
-                    foreach ($transactions as $transactionData) {
-                        try {
-                            if (!$options['dry_run'] ?? false) {
-                                $this->syncSingleTransaction($transactionData, $member, $options);
-                            }
-                            $successful++;
-                        } catch (\Exception $e) {
-                            $errors[] = "Transaction {$transactionData['id']}: " . $e->getMessage();
-                        }
-                        $processed++;
-                    }
-
-                } catch (\Exception $e) {
-                    $errors[] = "Member {$member->passkit_id} transactions: " . $e->getMessage();
-                    Log::error('Member transactions sync failed', [
-                        'member_id' => $member->passkit_id,
-                        'error' => $e->getMessage()
-                    ]);
-                }
-
-                if ($processed % 1000 === 0) {
-                    $this->logMessage("Processed {$processed} transactions");
-                }
-            }
-
-            $this->updateSyncStats([
-                'total_records' => $processed,
-                'processed_records' => $processed,
-                'successful_records' => $successful,
-                'failed_records' => count($errors),
-            ]);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult($errors);
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Sync templates from PassKit API
-     */
-    public function syncTemplates(array $options = []): array
-    {
-        $this->initializeSyncLog('templates', $options);
-
-        try {
-            $this->logMessage('Syncing templates');
-
-            $templates = $this->passKitService->listTemplates($options);
-            $processed = 0;
-            $successful = 0;
-            $errors = [];
-
-            foreach ($templates as $templateData) {
-                try {
-                    if (!$options['dry_run'] ?? false) {
-                        $this->syncSingleTemplate($templateData, $options);
-                    }
-                    $successful++;
-                } catch (\Exception $e) {
-                    $errors[] = "Template {$templateData['id']}: " . $e->getMessage();
-                    Log::error('Template sync failed', [
-                        'template_id' => $templateData['id'],
-                        'error' => $e->getMessage()
-                    ]);
-                }
-                $processed++;
-            }
-
-            $this->updateSyncStats([
-                'total_records' => count($templates),
-                'processed_records' => $processed,
-                'successful_records' => $successful,
-                'failed_records' => count($errors),
-            ]);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult($errors);
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    /**
-     * Sync wallet passes
-     */
-    public function syncWalletPasses(array $options = []): array
-    {
-        $this->initializeSyncLog('wallet_passes', $options);
-
-        try {
-            $this->logMessage('Syncing wallet passes');
-
-            $processed = 0;
-            $successful = 0;
-            $errors = [];
-
-            // Sync wallet passes for each member
-            $members = $this->getTargetMembers($options);
-
-            foreach ($members as $member) {
-                try {
-                    $passes = $this->passKitService->getMemberPasses($member->passkit_id);
-
-                    foreach ($passes as $passData) {
-                        try {
-                            if (!$options['dry_run'] ?? false) {
-                                $this->syncSingleWalletPass($passData, $member, $options);
-                            }
-                            $successful++;
-                        } catch (\Exception $e) {
-                            $errors[] = "Pass {$passData['id']}: " . $e->getMessage();
-                        }
-                        $processed++;
-                    }
-
-                } catch (\Exception $e) {
-                    $errors[] = "Member {$member->passkit_id} passes: " . $e->getMessage();
-                }
-            }
-
-            $this->updateSyncStats([
-                'total_records' => $processed,
-                'processed_records' => $processed,
-                'successful_records' => $successful,
-                'failed_records' => count($errors),
-            ]);
-
-            $this->completeSyncLog();
-
-            return $this->buildSyncResult($errors);
-
-        } catch (\Exception $e) {
-            $this->failSyncLog($e->getMessage());
-            throw $e;
-        }
-    }
-
-    // Protected helper methods
-
-    protected function initializeSyncLog(string $syncType, array $options): void
-    {
-        $this->syncStats = [];
-        
-        $this->currentSyncLog = PassKitSyncLog::create([
-            'account_id' => $options['account_id'] ?? 0,
-            'sync_type' => $syncType,
-            'sync_direction' => 'import',
-            'status' => 'started',
-            'program_id' => $options['program_id'] ?? null,
-            'entity_type' => $syncType,
-            'started_at' => now(),
-            'sync_from_date' => $options['since'] ?? null,
-            'sync_to_date' => $options['until'] ?? null,
-            'sync_options' => $options,
-            'triggered_by' => $options['triggered_by'] ?? 'system',
-            'trigger_source' => $options['trigger_source'] ?? 'cron',
-        ]);
-
-        $this->logMessage("Initialized sync log: {$this->currentSyncLog->id}");
-    }
-
-    protected function completeSyncLog(): void
-    {
-        if ($this->currentSyncLog) {
-            $completedAt = now();
-            $duration = $completedAt->diffInSeconds($this->currentSyncLog->started_at);
-            $recordsPerSecond = $duration > 0 ? ($this->syncStats['processed_records'] ?? 0) / $duration : 0;
-
-            $this->currentSyncLog->update([
-                'status' => 'completed',
-                'completed_at' => $completedAt,
-                'duration_seconds' => $duration,
-                'records_per_second' => $recordsPerSecond,
-                'total_records' => $this->syncStats['total_records'] ?? 0,
-                'processed_records' => $this->syncStats['processed_records'] ?? 0,
-                'successful_records' => $this->syncStats['successful_records'] ?? 0,
-                'failed_records' => $this->syncStats['failed_records'] ?? 0,
-                'skipped_records' => $this->syncStats['skipped_records'] ?? 0,
-            ]);
-
-            $this->logMessage("Completed sync log: {$this->currentSyncLog->id}");
-        }
-    }
-
-    protected function failSyncLog(string $errorMessage): void
-    {
-        if ($this->currentSyncLog) {
-            $this->currentSyncLog->update([
-                'status' => 'failed',
-                'error_message' => $errorMessage,
-                'completed_at' => now(),
-            ]);
-
-            $this->logMessage("Failed sync log: {$this->currentSyncLog->id} - {$errorMessage}");
-        }
-    }
-
-    protected function updateSyncStats(array $stats): void
-    {
-        $this->syncStats = array_merge($this->syncStats, $stats);
-    }
-
-    protected function logMessage(string $message): void
-    {
-        Log::info("[PassKit Sync] {$message}", [
-            'sync_log_id' => $this->currentSyncLog?->id,
-        ]);
-    }
-
-    protected function getLastSuccessfulSync(?int $accountId): ?PassKitSyncLog
-    {
-        $query = PassKitSyncLog::where('status', 'completed')
-            ->where('sync_type', 'incremental')
-            ->orderBy('completed_at', 'desc');
-
-        if ($accountId) {
-            $query->where('account_id', $accountId);
-        }
-
-        return $query->first();
-    }
-
-    protected function getTargetPrograms(array $options): Collection
-    {
-        $query = PassKitProgram::where('status', 'active');
-
-        if (!empty($options['account_id'])) {
-            $query->where('account_id', $options['account_id']);
-        }
-
-        if (!empty($options['program_id'])) {
-            $query->where('id', $options['program_id']);
-        }
-
-        return $query->get();
-    }
-
-    protected function getTargetMembers(array $options): Collection
-    {
-        $query = PassKitMember::where('status', 'active');
-
-        if (!empty($options['account_id'])) {
-            $query->where('account_id', $options['account_id']);
-        }
-
-        if (!empty($options['program_id'])) {
-            $query->where('program_id', $options['program_id']);
-        }
-
-        if (!empty($options['since'])) {
-            $query->where('last_activity_at', '>=', $options['since']);
-        }
-
-        return $query->get();
-    }
-
-    protected function buildSyncResult(array $errors = []): array
-    {
-        return [
-            'sync_log_id' => $this->currentSyncLog?->id,
-            'summary' => $this->syncStats,
-            'errors' => $errors,
-            'warnings' => [],
-        ];
-    }
-
-    // Individual entity sync methods
-
-    protected function syncSingleProgram(array $programData, array $options): void
-    {
-        PassKitProgram::updateOrCreate(
-            ['passkit_id' => $programData['id']],
-            [
-                'name' => $programData['name'],
-                'description' => $programData['description'] ?? null,
-                'program_type' => $programData['type'] ?? 'membership',
-                'status' => $programData['status'] ?? 'active',
-                'metadata' => $programData,
-                'account_id' => $options['account_id'] ?? 0,
-            ]
-        );
-    }
-
-    protected function syncSingleMember(array $memberData, PassKitProgram $program, array $options): void
-    {
-        PassKitMember::updateOrCreate(
-            ['passkit_id' => $memberData['id']],
-            [
-                'external_id' => $memberData['externalId'] ?? $memberData['id'],
-                'user_id' => null, // Would need to map from external_id
-                'account_id' => $program->account_id,
-                'program_id' => $program->id,
-                'tier_id' => $memberData['tierId'] ?? null,
-                'email' => $memberData['person']['emailAddress'] ?? null,
-                'first_name' => $memberData['person']['forename'] ?? null,
-                'last_name' => $memberData['person']['surname'] ?? null,
-                'points_balance' => $memberData['points'] ?? 0,
-                'status' => $memberData['status'] ?? 'active',
-                'enrolled_at' => isset($memberData['createdAt']) ? Carbon::parse($memberData['createdAt']) : now(),
-                'last_activity_at' => isset($memberData['updatedAt']) ? Carbon::parse($memberData['updatedAt']) : null,
-                'passkit_data' => $memberData,
-                'last_sync_at' => now(),
-            ]
-        );
-    }
-
-    protected function syncSingleTransaction(array $transactionData, PassKitMember $member, array $options): void
-    {
-        PassKitTransaction::updateOrCreate(
-            ['passkit_transaction_id' => $transactionData['id']],
-            [
-                'member_passkit_id' => $member->passkit_id,
-                'member_id' => $member->id,
-                'account_id' => $member->account_id,
-                'transaction_type' => $transactionData['type'] ?? 'earn',
-                'points_amount' => $transactionData['amount'] ?? 0,
-                'points_balance_before' => $transactionData['balanceBefore'] ?? 0,
-                'points_balance_after' => $transactionData['balanceAfter'] ?? 0,
-                'description' => $transactionData['description'] ?? null,
-                'reference_id' => $transactionData['referenceId'] ?? null,
-                'status' => $transactionData['status'] ?? 'completed',
-                'processed_at' => isset($transactionData['createdAt']) ? Carbon::parse($transactionData['createdAt']) : now(),
-                'passkit_data' => $transactionData,
-            ]
-        );
-    }
-
-    protected function syncSingleTemplate(array $templateData, array $options): void
-    {
-        CardTemplate::updateOrCreate(
-            ['passkit_template_id' => $templateData['id']],
-            [
-                'name' => $templateData['name'],
-                'description' => $templateData['description'] ?? null,
-                'template_type' => $templateData['type'] ?? 'membership',
-                'account_id' => $options['account_id'] ?? 0,
-                'is_active' => $templateData['status'] === 'active',
-                'template_data' => $templateData,
-                'last_used_at' => isset($templateData['updatedAt']) ? Carbon::parse($templateData['updatedAt']) : null,
-            ]
-        );
-    }
-
-    protected function syncSingleWalletPass(array $passData, PassKitMember $member, array $options): void
-    {
-        WalletPass::updateOrCreate(
-            ['passkit_id' => $passData['id']],
-            [
-                'member_passkit_id' => $member->passkit_id,
-                'user_id' => $member->user_id,
-                'account_id' => $member->account_id,
-                'program_id' => $member->program_id,
-                'pass_data' => $passData,
-                'status' => $passData['status'] ?? 'active',
-                'is_installed' => $passData['installed'] ?? false,
-                'issued_at' => isset($passData['createdAt']) ? Carbon::parse($passData['createdAt']) : now(),
-                'last_sync_at' => now(),
-            ]
-        );
-    }
-
-    // Additional sync methods for changed data
-
-    protected function syncChangedMembers(array $options): void
-    {
-        $this->logMessage('Syncing changed members since last sync');
-        $this->syncMembers($options);
-    }
-
-    protected function syncRecentTransactions(array $options): void
-    {
-        $this->logMessage('Syncing recent transactions since last sync');
-        $this->syncTransactions($options);
-    }
-
-    protected function syncChangedWalletPasses(array $options): void
-    {
-        $this->logMessage('Syncing changed wallet passes since last sync');
-        $this->syncWalletPasses($options);
-    }
-
-    protected function syncTiers(array $options = []): void
-    {
-        $this->logMessage('Syncing tiers');
-        
-        $programs = $this->getTargetPrograms($options);
-        
-        foreach ($programs as $program) {
+        $maxRetries = max(1, (int) ($options['max_retries'] ?? 1));
+        $attempt = 0;
+        $data = null;
+        $lastError = null;
+
+        while ($attempt < $maxRetries) {
+            $attempt++;
             try {
-                $tiers = $this->passKitService->listTiers($program->passkit_id);
-                
-                foreach ($tiers as $tierData) {
-                    PassKitTier::updateOrCreate(
-                        ['passkit_id' => $tierData['id']],
-                        [
-                            'name' => $tierData['name'],
-                            'description' => $tierData['description'] ?? null,
-                            'program_id' => $program->id,
-                            'metadata' => $tierData,
-                        ]
-                    );
-                }
-            } catch (\Exception $e) {
-                Log::error('Tier sync failed for program', [
-                    'program_id' => $program->passkit_id,
-                    'error' => $e->getMessage()
+                $data = $this->passKitService->getMember($passkitId);
+                $lastError = null;
+                break;
+            } catch (\Throwable $e) {
+                $lastError = $e;
+                Log::warning('syncMemberFromApi attempt failed', [
+                    'passkit_id' => $passkitId,
+                    'attempt' => $attempt,
+                    'error' => $e->getMessage(),
                 ]);
             }
         }
+
+        if ($data === null) {
+            $this->logSyncFailure('member', $passkitId, $accountId, $lastError?->getMessage() ?? 'Unknown error');
+            return null;
+        }
+
+        $member = PassKitMember::where('passkit_id', $passkitId)->first();
+        $attributes = $this->mapApiMemberToAttributes($data, $accountId);
+
+        if ($member) {
+            $member->update($attributes);
+        } else {
+            $member = PassKitMember::create(array_merge([
+                'passkit_id' => $passkitId,
+                'enrolled_at' => now(),
+                'status' => 'active',
+                'program_id' => 0,
+            ], $attributes));
+        }
+
+        $member->update(['last_sync_at' => now(), 'sync_pending' => false]);
+
+        return $member->fresh();
+    }
+
+    public function syncMemberToApi(PassKitMember $member): array
+    {
+        $payload = [
+            'externalId' => $member->external_id,
+            'email' => $member->email,
+            'firstName' => $member->first_name,
+            'lastName' => $member->last_name,
+            'points' => $member->points_balance,
+            'tier' => $member->tier_id,
+        ];
+
+        return (array) $this->passKitService->updateMember($member->passkit_id, $payload);
+    }
+
+    public function syncAllMembers(int $accountId, array $options = []): array
+    {
+        $batchSize = (int) ($options['batch_size'] ?? 100);
+        $members = PassKitMember::byAccount($accountId)->get();
+
+        $synced = 0;
+        $failed = 0;
+
+        foreach ($members as $member) {
+            $result = $this->syncMemberFromApi($member->passkit_id, $accountId);
+            if ($result !== null) {
+                $synced++;
+            } else {
+                $failed++;
+            }
+        }
+
+        return [
+            'synced' => $synced,
+            'failed' => $failed,
+            'batches_processed' => $members->count() > 0 ? (int) ceil($members->count() / max(1, $batchSize)) : 0,
+        ];
+    }
+
+    public function detectSyncConflicts(PassKitMember $member): array
+    {
+        try {
+            $apiData = $this->passKitService->getMember($member->passkit_id);
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        $conflicts = [];
+        if (isset($apiData['points']) && (int) $apiData['points'] !== (int) $member->points_balance) {
+            $conflicts['points_balance'] = [
+                'local' => $member->points_balance,
+                'remote' => (int) $apiData['points'],
+            ];
+        }
+
+        return $conflicts;
+    }
+
+    public function syncTransactionsFromApi(PassKitMember $member): array
+    {
+        $transactions = (array) $this->passKitService->getMemberTransactions($member->passkit_id);
+
+        $synced = 0;
+        $skipped = 0;
+
+        foreach ($transactions as $data) {
+            $passkitTransactionId = $data['id'] ?? null;
+            if ($passkitTransactionId === null) {
+                $skipped++;
+                continue;
+            }
+
+            $exists = PassKitTransaction::where('passkit_transaction_id', $passkitTransactionId)->exists();
+            if ($exists) {
+                $skipped++;
+                continue;
+            }
+
+            PassKitTransaction::create([
+                'passkit_transaction_id' => $passkitTransactionId,
+                'member_id' => $member->id,
+                'member_passkit_id' => $member->passkit_id,
+                'account_id' => $member->account_id,
+                'transaction_type' => $data['type'] ?? 'earn',
+                'points_amount' => (int) ($data['points'] ?? 0),
+                'points_balance_before' => $member->points_balance,
+                'points_balance_after' => $member->points_balance + (int) ($data['points'] ?? 0),
+                'description' => $data['description'] ?? null,
+                'status' => $data['status'] ?? 'completed',
+                'processed_at' => $data['created_at'] ?? now(),
+            ]);
+
+            $synced++;
+        }
+
+        return ['synced' => $synced, 'skipped' => $skipped];
+    }
+
+    public function syncTransactionToApi(PassKitTransaction $transaction): array
+    {
+        $payload = [
+            'type' => $transaction->transaction_type,
+            'points' => $transaction->points_amount,
+            'description' => $transaction->description,
+        ];
+
+        return (array) $this->passKitService->updateTransaction($transaction->passkit_transaction_id, $payload);
+    }
+
+    public function syncPassFromApi(string $passkitId, int $userId, int $accountId): ?WalletPass
+    {
+        try {
+            $data = $this->passKitService->getPass($passkitId);
+        } catch (\Throwable $e) {
+            $this->logSyncFailure('wallet_pass', $passkitId, $accountId, $e->getMessage());
+            return null;
+        }
+
+        $pass = WalletPass::where('passkit_id', $passkitId)->first();
+        $attributes = [
+            'status' => $data['status'] ?? 'active',
+            'pass_data' => $data['data'] ?? [],
+            'is_installed' => (bool) ($data['installed'] ?? false),
+            'device_type' => $data['device_type'] ?? null,
+            'member_passkit_id' => $data['member_id'] ?? null,
+        ];
+
+        if ($pass) {
+            $pass->update($attributes);
+        } else {
+            $pass = WalletPass::create(array_merge([
+                'passkit_id' => $passkitId,
+                'user_id' => $userId,
+                'account_id' => $accountId,
+                'issued_at' => now(),
+            ], $attributes));
+        }
+
+        $pass->update(['last_sync_at' => now(), 'sync_pending' => false]);
+
+        return $pass->fresh();
+    }
+
+    public function syncPassToApi(WalletPass $pass): array
+    {
+        $payload = [
+            'status' => $pass->status,
+            'data' => $pass->pass_data,
+        ];
+
+        return (array) $this->passKitService->updatePass($pass->passkit_id, $payload);
+    }
+
+    public function syncAllPassesForUser(int $userId): array
+    {
+        $passes = WalletPass::where('user_id', $userId)->get();
+
+        $synced = 0;
+        $failed = 0;
+
+        foreach ($passes as $pass) {
+            $result = $this->syncPassFromApi($pass->passkit_id, $userId, $pass->account_id);
+            if ($result !== null) {
+                $synced++;
+            } else {
+                $failed++;
+            }
+        }
+
+        return ['synced' => $synced, 'failed' => $failed];
+    }
+
+    public function performFullSync(int $accountId): array
+    {
+        $memberResults = $this->syncAllMembers($accountId);
+
+        $transactionSynced = 0;
+        $transactionSkipped = 0;
+        foreach (PassKitMember::byAccount($accountId)->get() as $member) {
+            $result = $this->syncTransactionsFromApi($member);
+            $transactionSynced += $result['synced'];
+            $transactionSkipped += $result['skipped'];
+        }
+
+        $passSynced = 0;
+        $passFailed = 0;
+        foreach (WalletPass::where('account_id', $accountId)->get() as $pass) {
+            $result = $this->syncPassFromApi($pass->passkit_id, $pass->user_id, $accountId);
+            if ($result !== null) {
+                $passSynced++;
+            } else {
+                $passFailed++;
+            }
+        }
+
+        return [
+            'members' => $memberResults,
+            'transactions' => ['synced' => $transactionSynced, 'skipped' => $transactionSkipped],
+            'passes' => ['synced' => $passSynced, 'failed' => $passFailed],
+        ];
+    }
+
+    public function syncSince(int $accountId, $since): array
+    {
+        $data = (array) $this->passKitService->getMembersSince((string) $since);
+
+        $synced = 0;
+        foreach ($data as $apiMember) {
+            $member = PassKitMember::where('passkit_id', $apiMember['id'] ?? '')->first();
+            if ($member) {
+                $member->update($this->mapApiMemberToAttributes($apiMember, $accountId));
+                $synced++;
+            }
+        }
+
+        return ['members_synced' => $synced];
+    }
+
+    public function getSyncStatus(int $accountId): array
+    {
+        $membersPending = PassKitMember::byAccount($accountId)->where('sync_pending', true)->count();
+        $passesPending = WalletPass::where('account_id', $accountId)->where('sync_pending', true)->count();
+        $lastSync = PassKitMember::byAccount($accountId)->max('last_sync_at');
+
+        return [
+            'last_sync_at' => $lastSync,
+            'members_pending_sync' => $membersPending,
+            'passes_pending_sync' => $passesPending,
+            'sync_health' => ($membersPending + $passesPending) === 0 ? 'healthy' : 'pending',
+        ];
+    }
+
+    public function markSyncPending($entity): void
+    {
+        $entity->update(['sync_pending' => true]);
+    }
+
+    public function clearSyncPending($entity): void
+    {
+        $entity->update(['sync_pending' => false, 'last_sync_at' => now()]);
+    }
+
+    public function getSyncConflicts(int $accountId): array
+    {
+        $conflicts = [];
+
+        foreach (PassKitMember::byAccount($accountId)->get() as $member) {
+            $memberConflicts = $this->detectSyncConflicts($member);
+            if (!empty($memberConflicts)) {
+                $conflicts[] = [
+                    'entity_type' => 'member',
+                    'entity_id' => $member->id,
+                    'passkit_id' => $member->passkit_id,
+                    'conflict_fields' => array_keys($memberConflicts),
+                    'details' => $memberConflicts,
+                ];
+            }
+        }
+
+        return $conflicts;
+    }
+
+    protected function mapApiMemberToAttributes(array $data, int $accountId): array
+    {
+        $attrs = ['account_id' => $accountId];
+
+        $map = [
+            'externalId' => 'external_id',
+            'email' => 'email',
+            'firstName' => 'first_name',
+            'lastName' => 'last_name',
+            'points' => 'points_balance',
+            'tier' => 'tier_id',
+            'status' => 'status',
+        ];
+
+        foreach ($map as $apiKey => $column) {
+            if (array_key_exists($apiKey, $data)) {
+                $attrs[$column] = $data[$apiKey];
+            }
+        }
+
+        if (isset($data['points'])) {
+            $attrs['points_balance'] = (int) $data['points'];
+        }
+
+        return $attrs;
+    }
+
+    protected function logSyncFailure(string $entityType, string $passkitId, int $accountId, string $error): void
+    {
+        $entityRecord = null;
+        if ($entityType === 'member') {
+            $entityRecord = PassKitMember::where('passkit_id', $passkitId)->first();
+        } elseif ($entityType === 'wallet_pass') {
+            $entityRecord = WalletPass::where('passkit_id', $passkitId)->first();
+        }
+
+        PassKitAuditLog::create([
+            'account_id' => $accountId,
+            'event_type' => 'sync_failed',
+            'entity_type' => $entityType,
+            'entity_id' => $entityRecord?->id,
+            'passkit_id' => $passkitId,
+            'source' => 'sync',
+            'operation' => 'sync',
+            'status' => 'failed',
+            'error_message' => $error,
+            'correlation_id' => (string) Str::uuid(),
+        ]);
     }
 }

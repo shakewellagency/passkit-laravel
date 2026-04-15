@@ -22,7 +22,6 @@ class PassKitProgram extends Model
     ];
 
     protected $casts = [
-        'status' => 'array',
         'metadata' => 'array',
         'last_synced_at' => 'datetime'
     ];
@@ -48,7 +47,7 @@ class PassKitProgram extends Model
      */
     public function tiers(): HasMany
     {
-        return $this->hasMany(PassKitTier::class, 'program_id', 'passkit_id');
+        return $this->hasMany(PassKitTier::class, 'program_id');
     }
 
     /**
@@ -59,44 +58,57 @@ class PassKitProgram extends Model
         return $this->hasMany(CardTemplate::class, 'passkit_program_id', 'passkit_id');
     }
 
-    /**
-     * Scope for active programs.
-     */
     public function scopeActive($query)
     {
-        return $query->whereJsonContains('status', 'PROJECT_ACTIVE_FOR_OBJECT_CREATION');
+        return $query->where('status', 'active');
     }
 
-    /**
-     * Scope for programs by type.
-     */
     public function scopeByType($query, string $type)
     {
         return $query->where('program_type', $type);
     }
 
-    /**
-     * Scope for programs by account.
-     */
-    public function scopeForAccount($query, $accountId)
+    public function scopeByAccount($query, $accountId)
     {
         return $query->where('account_id', $accountId);
     }
 
-    /**
-     * Check if program is active.
-     */
-    public function isActive(): bool
+    // Retained for backward compatibility with earlier callers.
+    public function scopeForAccount($query, $accountId)
     {
-        return in_array('PROJECT_ACTIVE_FOR_OBJECT_CREATION', $this->status ?? []);
+        return $this->scopeByAccount($query, $accountId);
     }
 
-    /**
-     * Check if program is published.
-     */
+    public function getIsActiveAttribute(): bool
+    {
+        return $this->status === 'active';
+    }
+
+    public function isActive(): bool
+    {
+        return $this->status === 'active';
+    }
+
     public function isPublished(): bool
     {
-        return in_array('PROJECT_PUBLISHED', $this->status ?? []);
+        return $this->status === 'active';
+    }
+
+    public function activate(): void
+    {
+        $this->status = 'active';
+        $this->save();
+    }
+
+    public function deactivate(): void
+    {
+        $this->status = 'inactive';
+        $this->save();
+    }
+
+    public function getTiersCount(): int
+    {
+        return $this->tiers()->count();
     }
 
     /**

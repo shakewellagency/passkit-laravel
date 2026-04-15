@@ -11,7 +11,7 @@
 |
 */
 
-uses(ShakewellAgency\PassKitLaravel\Tests\TestCase::class)->in('Feature', 'Unit');
+uses(ShakewellAgency\PassKitLaravel\Tests\TestCase::class)->in('Feature', 'Unit', 'Integration');
 
 /*
 |--------------------------------------------------------------------------
@@ -117,8 +117,11 @@ function createTestWalletPass(array $attributes = []): \ShakewellAgency\PassKitL
 function createTestTransaction(array $attributes = []): \ShakewellAgency\PassKitLaravel\Models\PassKitTransaction
 {
     $member = createTestMember();
-    
-    return \ShakewellAgency\PassKitLaravel\Models\PassKitTransaction::create(array_merge([
+
+    $createdAt = $attributes['created_at'] ?? null;
+    unset($attributes['created_at']);
+
+    $transaction = \ShakewellAgency\PassKitLaravel\Models\PassKitTransaction::create(array_merge([
         'passkit_transaction_id' => 'test_txn_' . uniqid(),
         'member_passkit_id' => $member->passkit_id,
         'member_id' => $member->id,
@@ -131,6 +134,13 @@ function createTestTransaction(array $attributes = []): \ShakewellAgency\PassKit
         'status' => 'completed',
         'processed_at' => now(),
     ], $attributes));
+
+    if ($createdAt !== null) {
+        $transaction->created_at = $createdAt;
+        $transaction->saveQuietly();
+    }
+
+    return $transaction;
 }
 
 function createTestCardTemplate(array $attributes = []): \ShakewellAgency\PassKitLaravel\Models\CardTemplate
@@ -156,12 +166,16 @@ function mockPassKitService(): \Mockery\MockInterface
 
 function createTestAuditLog(array $attributes = []): \ShakewellAgency\PassKitLaravel\Models\PassKitAuditLog
 {
-    return \ShakewellAgency\PassKitLaravel\Models\PassKitAuditLog::create(array_merge([
+    $createdAt = $attributes['created_at'] ?? null;
+    unset($attributes['created_at']);
+
+    $log = \ShakewellAgency\PassKitLaravel\Models\PassKitAuditLog::create(array_merge([
         'account_id' => 1,
         'event_type' => 'test_event',
         'entity_type' => 'test_entity',
         'entity_id' => '123',
         'user_id' => 1,
+        'source' => 'api',
         'operation' => 'test_operation',
         'description' => 'Test audit log',
         'status' => 'success',
@@ -169,4 +183,11 @@ function createTestAuditLog(array $attributes = []): \ShakewellAgency\PassKitLar
         'correlation_id' => 'test_correlation_' . uniqid(),
         'security_level' => 'normal',
     ], $attributes));
+
+    if ($createdAt !== null) {
+        $log->created_at = $createdAt;
+        $log->saveQuietly();
+    }
+
+    return $log;
 }

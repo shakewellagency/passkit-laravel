@@ -12,6 +12,10 @@ return [
 
     'testing_mode' => env('PASSKIT_TESTING_MODE', false),
 
+    'api_url' => env('PASSKIT_API_URL', 'https://grpc.pub2.passkit.io'),
+
+    'certificate_path' => env('PASSKIT_CERTIFICATE_PATH', storage_path('app/passkit/certificate.pem')),
+
     'api' => [
         'host' => env('PASSKIT_API_HOST', 'grpc.pub2.passkit.io'),
         'port' => env('PASSKIT_API_PORT', 443),

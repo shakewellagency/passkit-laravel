@@ -11,6 +11,8 @@ class PassKitAuditLog extends Model
 {
     use HasFactory;
 
+    protected $table = 'passkit_audit_logs';
+
     protected $fillable = [
         'account_id',
         'event_type',
@@ -72,9 +74,9 @@ class PassKitAuditLog extends Model
         'passkit_response_headers' => 'array',
         'validation_errors' => 'array',
         'tags' => 'array',
-        'execution_time_ms' => 'decimal:3',
-        'passkit_response_time_ms' => 'decimal:3',
-        'business_impact_score' => 'decimal:2',
+        'execution_time_ms' => 'float',
+        'passkit_response_time_ms' => 'float',
+        'business_impact_score' => 'float',
         'approved_at' => 'datetime',
         'expires_at' => 'datetime',
         'archived_at' => 'datetime',
@@ -368,11 +370,11 @@ class PassKitAuditLog extends Model
         $query = self::byAccount($accountId)->recentDays($days);
         
         return [
-            'avg_execution_time' => $query->avg('execution_time_ms'),
-            'max_execution_time' => $query->max('execution_time_ms'),
+            'avg_execution_time' => (float) $query->avg('execution_time_ms'),
+            'max_execution_time' => (float) $query->max('execution_time_ms'),
             'slow_operations' => $query->slowOperations()->count(),
             'total_operations' => $query->count(),
-            'success_rate' => $query->successful()->count() / max(1, $query->count()) * 100,
+            'success_rate' => (float) ($query->successful()->count() / max(1, $query->count()) * 100),
         ];
     }
 }

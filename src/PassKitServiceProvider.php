@@ -32,7 +32,10 @@ class PassKitServiceProvider extends ServiceProvider
         });
 
         $this->app->singleton(PassKitSyncService::class, function ($app) {
-            return new PassKitSyncService($app->make(PassKitService::class));
+            return new PassKitSyncService(
+                $app->make(PassKitService::class),
+                $app->make(PassKitCrudManager::class),
+            );
         });
 
         $this->app->alias(PassKitService::class, 'passkit');

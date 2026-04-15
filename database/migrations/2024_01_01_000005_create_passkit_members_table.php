@@ -60,7 +60,8 @@ return new class extends Migration
             // PassKit specific
             $table->json('passkit_data')->nullable(); // Raw PassKit member data
             $table->datetime('last_sync_at')->nullable(); // Last sync with PassKit
-            
+            $table->boolean('sync_pending')->default(false); // Marks records pending re-sync
+
             $table->timestamps();
 
             // Foreign keys

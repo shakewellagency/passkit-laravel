@@ -2,621 +2,377 @@
 
 namespace ShakewellAgency\PassKitLaravel\Services;
 
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Request;
-use Illuminate\Support\Str;
-use Carbon\Carbon;
 use ShakewellAgency\PassKitLaravel\Models\PassKitAuditLog;
 use ShakewellAgency\PassKitLaravel\Models\PassKitSecurityLog;
 use ShakewellAgency\PassKitLaravel\Models\PassKitPerformanceLog;
-use ShakewellAgency\PassKitLaravel\Models\PassKitDataChange;
-use ShakewellAgency\PassKitLaravel\Models\PassKitComplianceLog;
+use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Support\Str;
 
 class PassKitAuditService
 {
-    protected array $currentOperation = [];
-    protected ?string $correlationId = null;
-    protected ?string $batchId = null;
-    protected float $operationStartTime;
-
-    public function __construct()
-    {
-        $this->correlationId = Str::uuid()->toString();
-        $this->operationStartTime = microtime(true);
-    }
-
-    /**
-     * Start a new audit operation
-     */
-    public function startOperation(string $operation, array $context = []): string
-    {
-        $this->correlationId = Str::uuid()->toString();
-        $this->operationStartTime = microtime(true);
-        
-        $this->currentOperation = array_merge([
-            'operation' => $operation,
-            'correlation_id' => $this->correlationId,
-            'started_at' => now(),
-            'start_time' => $this->operationStartTime,
-        ], $context);
-
-        return $this->correlationId;
-    }
-
-    /**
-     * Log a general audit event
-     */
     public function log(array $data): PassKitAuditLog
     {
-        $executionTime = (microtime(true) - $this->operationStartTime) * 1000;
+        $createdAt = $data['created_at'] ?? null;
+        $attrs = $this->normalizeLogAttributes($data);
 
-        $auditData = array_merge([
-            'correlation_id' => $this->correlationId,
-            'batch_id' => $this->batchId,
-            'execution_time_ms' => $executionTime,
-            'ip_address' => Request::ip(),
-            'user_agent' => Request::userAgent(),
-            'source' => $this->determineSource(),
-            'user_id' => Auth::id(),
-            'user_type' => $this->determineUserType(),
-            'session_id' => session()->getId(),
-            'data_validated' => true,
-            'sensitive_data_masked' => $this->containsSensitiveData($data),
-            'security_level' => $this->determineSecurityLevel($data),
-            'business_impact_score' => $this->calculateBusinessImpact($data),
-            'checksum' => $this->generateChecksum($data),
-        ], $data);
+        $log = PassKitAuditLog::create($attrs);
 
-        // Mask sensitive data
-        if ($auditData['sensitive_data_masked']) {
-            $auditData = $this->maskSensitiveData($auditData);
+        if ($createdAt !== null) {
+            $log->created_at = $createdAt;
+            $log->saveQuietly();
         }
 
-        $auditLog = PassKitAuditLog::create($auditData);
-
-        // Create related logs based on event type
-        $this->createRelatedLogs($auditLog, $data);
-
-        return $auditLog;
+        return $log->refresh();
     }
 
-    /**
-     * Log a successful operation
-     */
-    public function logSuccess(string $eventType, string $entityType, array $context = []): PassKitAuditLog
+    public function logSecurityEvent(array $data): PassKitAuditLog
     {
-        return $this->log(array_merge([
-            'event_type' => $eventType,
-            'entity_type' => $entityType,
-            'status' => 'success',
-            'operation' => $this->currentOperation['operation'] ?? $eventType,
-        ], $context));
-    }
+        $data['event_type'] = $data['event_type'] ?? 'security_event';
+        $data['security_level'] = $data['security_level'] ?? 'normal';
 
-    /**
-     * Log a failed operation
-     */
-    public function logFailure(string $eventType, string $entityType, string $errorMessage, array $context = []): PassKitAuditLog
-    {
-        return $this->log(array_merge([
-            'event_type' => $eventType,
-            'entity_type' => $entityType,
-            'status' => 'failed',
-            'operation' => $this->currentOperation['operation'] ?? $eventType,
-            'error_message' => $errorMessage,
-            'error_details' => $context['error_details'] ?? null,
-        ], $context));
-    }
+        $log = $this->log($data);
 
-    /**
-     * Log data changes for sensitive operations
-     */
-    public function logDataChange(string $tableName, string $columnName, $oldValue, $newValue, array $context = []): PassKitAuditLog
-    {
-        $auditLog = $this->log(array_merge([
-            'event_type' => 'data_change',
-            'entity_type' => $tableName,
-            'operation' => 'update',
-            'status' => 'success',
-            'description' => "Data changed in {$tableName}.{$columnName}",
-        ], $context));
-
-        // Create detailed change record
-        PassKitDataChange::create([
-            'audit_log_id' => $auditLog->id,
-            'account_id' => $context['account_id'] ?? 0,
-            'table_name' => $tableName,
-            'column_name' => $columnName,
-            'old_value' => $this->serializeValue($oldValue),
-            'new_value' => $this->serializeValue($newValue),
-            'change_type' => 'update',
-            'data_classification' => $this->classifyData($columnName, $newValue),
-            'pii_data' => $this->isPiiData($columnName, $newValue),
-            'financial_data' => $this->isFinancialData($columnName, $newValue),
-            'sensitive_data' => $this->isSensitiveData($columnName, $newValue),
-            'impact_level' => $this->assessChangeImpact($tableName, $columnName, $oldValue, $newValue),
-            'requires_notification' => $this->requiresNotification($tableName, $columnName),
-            'requires_approval' => $this->requiresApproval($tableName, $columnName),
-            'rollback_available' => true,
-            'rollback_expires_at' => now()->addDays(30),
-        ]);
-
-        return $auditLog;
-    }
-
-    /**
-     * Log security events
-     */
-    public function logSecurityEvent(string $securityEvent, string $threatLevel, array $context = []): PassKitAuditLog
-    {
-        $auditLog = $this->log(array_merge([
-            'event_type' => 'security_event',
-            'entity_type' => 'security',
-            'operation' => $securityEvent,
-            'status' => 'warning',
-            'security_level' => 'high',
-            'description' => "Security event: {$securityEvent}",
-        ], $context));
-
-        // Create detailed security log
         PassKitSecurityLog::create([
-            'audit_log_id' => $auditLog->id,
-            'account_id' => $context['account_id'] ?? 0,
-            'security_event' => $securityEvent,
-            'threat_level' => $threatLevel,
-            'source_ip' => Request::ip(),
-            'user_agent' => Request::userAgent(),
-            'attack_pattern' => $context['attack_pattern'] ?? null,
-            'automated_detection' => $context['automated_detection'] ?? false,
-            'detection_rule' => $context['detection_rule'] ?? null,
-            'confidence_score' => $context['confidence_score'] ?? null,
-            'response_action' => $context['response_action'] ?? 'logged',
-            'automatic_response' => $context['automatic_response'] ?? false,
-            'requires_investigation' => $threatLevel === 'critical' || $threatLevel === 'high',
-            'regulatory_reportable' => $context['regulatory_reportable'] ?? false,
+            'audit_log_id' => $log->id,
+            'account_id' => $log->account_id,
+            'security_event' => $data['security_event'] ?? $data['event_type'],
+            'threat_level' => $data['threat_level'] ?? 'low',
+            'source_ip' => $data['source_ip'] ?? '0.0.0.0',
+            'user_agent' => $data['user_agent'] ?? null,
+            'risk_indicators' => $data['risk_indicators'] ?? null,
+            'mitigation_actions' => $data['mitigation_actions'] ?? null,
         ]);
 
-        return $auditLog;
+        return $log->fresh(['securityLog']);
     }
 
-    /**
-     * Log performance metrics
-     */
-    public function logPerformance(string $operationType, float $durationMs, array $metrics = []): PassKitAuditLog
+    public function logPerformanceEvent(array $data): PassKitAuditLog
     {
-        $auditLog = $this->log([
-            'event_type' => 'performance_metric',
-            'entity_type' => 'performance',
-            'operation' => $operationType,
-            'status' => 'success',
-            'description' => "Performance metrics for {$operationType}",
+        $data['event_type'] = $data['event_type'] ?? 'performance_event';
+
+        $log = $this->log($data);
+
+        PassKitPerformanceLog::create([
+            'audit_log_id' => $log->id,
+            'account_id' => $log->account_id,
+            'operation_type' => $data['operation_type'] ?? 'unknown',
+            'duration_ms' => $data['execution_time_ms'] ?? 0,
+            'memory_usage_mb' => $data['memory_usage_mb'] ?? null,
+            'cpu_usage_percent' => $data['cpu_usage_percent'] ?? null,
+            'performance_threshold_exceeded' => $data['performance_threshold_exceeded'] ?? false,
+            'performance_grade' => $data['performance_grade'] ?? null,
+            'performance_score' => $data['performance_score'] ?? null,
         ]);
 
-        // Create detailed performance log
-        PassKitPerformanceLog::create(array_merge([
-            'audit_log_id' => $auditLog->id,
-            'account_id' => $metrics['account_id'] ?? 0,
-            'operation_type' => $operationType,
-            'duration_ms' => $durationMs,
-            'performance_threshold_exceeded' => $durationMs > ($metrics['threshold_ms'] ?? 5000),
-            'performance_grade' => $this->calculatePerformanceGrade($durationMs, $metrics),
-            'performance_score' => $this->calculatePerformanceScore($durationMs, $metrics),
-        ], $metrics));
-
-        return $auditLog;
+        return $log->fresh(['performanceLog']);
     }
 
-    /**
-     * Log compliance events
-     */
-    public function logCompliance(string $regulation, string $requirement, string $status, array $context = []): PassKitAuditLog
+    public function logChange(array $data): PassKitAuditLog
     {
-        $auditLog = $this->log(array_merge([
-            'event_type' => 'compliance_check',
-            'entity_type' => 'compliance',
-            'operation' => $regulation,
-            'status' => $status === 'compliant' ? 'success' : 'warning',
-            'description' => "Compliance check for {$regulation}: {$requirement}",
-        ], $context));
-
-        // Create detailed compliance log
-        PassKitComplianceLog::create([
-            'audit_log_id' => $auditLog->id,
-            'account_id' => $context['account_id'] ?? 0,
-            'regulation' => $regulation,
-            'compliance_requirement' => $requirement,
-            'compliance_status' => $status,
-            'compliance_score' => $context['compliance_score'] ?? null,
-            'risk_level' => $context['risk_level'] ?? 'medium',
-            'requires_remediation' => $status !== 'compliant',
-            'remediation_deadline' => $status !== 'compliant' ? now()->addDays(30) : null,
-        ]);
-
-        return $auditLog;
+        $data['event_type'] = $data['event_type'] ?? 'entity_changed';
+        $data['operation'] = $data['operation'] ?? 'update';
+        return $this->log($data);
     }
 
-    /**
-     * Set batch ID for related operations
-     */
-    public function setBatchId(string $batchId): void
+    public function detectSuspiciousPatterns(int $accountId): array
     {
-        $this->batchId = $batchId;
-    }
-
-    /**
-     * Log PassKit API operations
-     */
-    public function logPassKitOperation(string $operation, array $request, array $response, float $responseTime): PassKitAuditLog
-    {
-        return $this->log([
-            'event_type' => 'passkit_api_call',
-            'entity_type' => 'api',
-            'operation' => $operation,
-            'status' => isset($response['error']) ? 'failed' : 'success',
-            'description' => "PassKit API call: {$operation}",
-            'passkit_operation' => $operation,
-            'passkit_response_code' => $response['status_code'] ?? 200,
-            'passkit_response_time_ms' => $responseTime,
-            'request_data' => $this->sanitizeApiData($request),
-            'response_data' => $this->sanitizeApiData($response),
-            'error_message' => $response['error'] ?? null,
-        ]);
-    }
-
-    /**
-     * Get audit statistics
-     */
-    public function getAuditStatistics(int $accountId, int $days = 7): array
-    {
-        $startDate = now()->subDays($days);
+        $failedLogins = PassKitSecurityLog::where('account_id', $accountId)
+            ->where('security_event', 'failed_authentication')
+            ->where('created_at', '>=', now()->subHour())
+            ->get();
 
         return [
-            'total_events' => PassKitAuditLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->count(),
-            
-            'events_by_type' => PassKitAuditLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->groupBy('event_type')
-                ->selectRaw('event_type, COUNT(*) as count')
-                ->pluck('count', 'event_type'),
-            
-            'success_rate' => PassKitAuditLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->where('status', 'success')
-                ->count() / max(1, PassKitAuditLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->count()) * 100,
-            
-            'security_events' => PassKitSecurityLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->count(),
-            
-            'high_risk_events' => PassKitSecurityLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->whereIn('threat_level', ['high', 'critical'])
-                ->count(),
-            
-            'performance_issues' => PassKitPerformanceLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->where('performance_threshold_exceeded', true)
-                ->count(),
-            
-            'compliance_violations' => PassKitComplianceLog::where('account_id', $accountId)
-                ->where('created_at', '>=', $startDate)
-                ->where('compliance_status', 'non_compliant')
-                ->count(),
+            'failed_logins' => [
+                'count' => $failedLogins->count(),
+                'source_ips' => $failedLogins->pluck('source_ip')->unique()->values()->all(),
+            ],
         ];
     }
 
-    /**
-     * Clean up old audit logs based on retention policy
-     */
-    public function cleanupAuditLogs(int $retentionDays = 90): int
+    public function assessChangeSignificance(PassKitAuditLog $log): array
     {
-        $cutoffDate = now()->subDays($retentionDays);
-        
-        return PassKitAuditLog::where('created_at', '<', $cutoffDate)
-            ->where('archived', false)
+        $reasons = [];
+        $old = $log->old_values ?? [];
+        $new = $log->new_values ?? [];
+
+        if (isset($old['points'], $new['points'])) {
+            $delta = abs((int) $new['points'] - (int) $old['points']);
+            if ($delta >= 1000) {
+                $reasons[] = 'large_points_change';
+            }
+        }
+
+        if (isset($old['status'], $new['status']) && $old['status'] !== $new['status']) {
+            $reasons[] = 'status_change';
+        }
+
+        return [
+            'is_significant' => !empty($reasons),
+            'significance_reasons' => $reasons,
+        ];
+    }
+
+    public function getEntityChangeHistory(string $entityType, $entityId): Collection
+    {
+        return PassKitAuditLog::where('entity_type', $entityType)
+            ->where('entity_id', $entityId)
+            ->orderByDesc('created_at')
+            ->get();
+    }
+
+    public function getSlowOperations(int $accountId, float $thresholdMs): Collection
+    {
+        return PassKitAuditLog::where('account_id', $accountId)
+            ->where('execution_time_ms', '>=', $thresholdMs)
+            ->get();
+    }
+
+    public function getPerformanceSummary(int $accountId, int $days = 7): array
+    {
+        $logs = PassKitAuditLog::where('account_id', $accountId)
+            ->where('created_at', '>=', now()->subDays($days))
+            ->whereNotNull('execution_time_ms')
+            ->get();
+
+        $distribution = PassKitPerformanceLog::whereIn('audit_log_id', $logs->pluck('id'))
+            ->selectRaw('performance_grade, COUNT(*) as count')
+            ->groupBy('performance_grade')
+            ->pluck('count', 'performance_grade')
+            ->all();
+
+        return [
+            'avg_execution_time' => (float) ($logs->avg('execution_time_ms') ?? 0),
+            'max_execution_time' => (float) ($logs->max('execution_time_ms') ?? 0),
+            'slow_operations' => $logs->where('execution_time_ms', '>', 1000)->count(),
+            'performance_distribution' => $distribution,
+        ];
+    }
+
+    public function generateComplianceReport(int $accountId, array $options = []): array
+    {
+        $days = $options['period_days'] ?? 30;
+        $base = PassKitAuditLog::where('account_id', $accountId)
+            ->where('created_at', '>=', now()->subDays($days));
+
+        $gdprCount = (clone $base)->where('gdpr_relevant', true)->count();
+        $securityCount = PassKitSecurityLog::where('account_id', $accountId)
+            ->where('created_at', '>=', now()->subDays($days))
+            ->count();
+        $total = (clone $base)->count();
+        $failed = (clone $base)->where('status', 'failed')->count();
+        $score = $total > 0 ? max(0, 100 - (int) round(($failed / $total) * 100)) : 100;
+
+        return [
+            'period' => ['days' => $days, 'from' => now()->subDays($days)->toIso8601String(), 'to' => now()->toIso8601String()],
+            'total_events' => $total,
+            'gdpr_events' => $gdprCount,
+            'security_events' => $securityCount,
+            'compliance_score' => $score,
+        ];
+    }
+
+    public function generateEntityAuditTrail(string $entityType, $entityId): array
+    {
+        return PassKitAuditLog::where('entity_type', $entityType)
+            ->where('entity_id', $entityId)
+            ->orderBy('created_at')
+            ->get()
+            ->map(fn ($log) => [
+                'event_type' => $log->event_type,
+                'operation' => $log->operation,
+                'status' => $log->status,
+                'created_at' => $log->created_at?->toIso8601String(),
+                'user_id' => $log->user_id,
+                'old_values' => $log->old_values,
+                'new_values' => $log->new_values,
+            ])
+            ->all();
+    }
+
+    public function exportAuditLogs(int $accountId, array $options = []): array
+    {
+        $format = $options['format'] ?? 'csv';
+        $dateFrom = $options['date_from'] ?? now()->subDays(30);
+        $dateTo = $options['date_to'] ?? now();
+
+        $logs = PassKitAuditLog::where('account_id', $accountId)
+            ->whereBetween('created_at', [$dateFrom, $dateTo])
+            ->orderBy('created_at')
+            ->get();
+
+        $csv = "id,event_type,entity_type,entity_id,status,created_at\n";
+        foreach ($logs as $log) {
+            $csv .= sprintf(
+                "%d,%s,%s,%s,%s,%s\n",
+                $log->id,
+                $log->event_type,
+                $log->entity_type,
+                $log->entity_id,
+                $log->status,
+                $log->created_at?->toIso8601String()
+            );
+        }
+
+        return [
+            'filename' => sprintf('audit-logs-%d-%s.%s', $accountId, now()->format('Ymd-His'), $format),
+            'content' => $csv,
+            'mime_type' => $format === 'csv' ? 'text/csv' : 'application/json',
+        ];
+    }
+
+    public function searchLogs(int $accountId, array $options = []): Collection
+    {
+        $query = PassKitAuditLog::where('account_id', $accountId);
+
+        if (!empty($options['query'])) {
+            $term = $options['query'];
+            $query->where(function ($q) use ($term) {
+                $q->where('description', 'like', "%{$term}%")
+                    ->orWhere('event_type', 'like', "%{$term}%");
+            });
+        }
+
+        if (!empty($options['event_types'])) {
+            $query->whereIn('event_type', $options['event_types']);
+        }
+
+        return $query->get();
+    }
+
+    public function getEventStatistics(int $accountId, int $days = 7): array
+    {
+        return PassKitAuditLog::where('account_id', $accountId)
+            ->where('created_at', '>=', now()->subDays($days))
+            ->selectRaw('event_type, COUNT(*) as count')
+            ->groupBy('event_type')
+            ->orderByDesc('count')
+            ->get()
+            ->map(fn ($row) => ['event_type' => $row->event_type, 'count' => (int) $row->count])
+            ->all();
+    }
+
+    public function analyzeUserActivity(int $userId, int $accountId): array
+    {
+        $logs = PassKitAuditLog::where('account_id', $accountId)
+            ->where('user_id', $userId)
+            ->get();
+
+        $hours = $logs->groupBy(fn ($log) => (int) $log->created_at?->format('H'))
+            ->map->count()
+            ->all();
+
+        $mostActive = !empty($hours) ? array_keys($hours, max($hours))[0] : null;
+
+        return [
+            'total_events' => $logs->count(),
+            'events_by_hour' => $hours,
+            'most_active_hour' => $mostActive,
+            'activity_trend' => $logs->count() > 0 ? 'active' : 'inactive',
+        ];
+    }
+
+    public function detectAnomalies(int $accountId): array
+    {
+        $logs = PassKitAuditLog::where('account_id', $accountId)
+            ->whereNotNull('execution_time_ms')
+            ->get();
+
+        if ($logs->count() < 5) {
+            return [];
+        }
+
+        $mean = $logs->avg('execution_time_ms');
+        $stddev = sqrt($logs->map(fn ($l) => pow($l->execution_time_ms - $mean, 2))->avg());
+        $threshold = $mean + (3 * $stddev);
+
+        $anomalies = [];
+        foreach ($logs as $log) {
+            if ($log->execution_time_ms > $threshold && $log->execution_time_ms > 1000) {
+                $anomalies[] = [
+                    'type' => 'execution_time_anomaly',
+                    'log_id' => $log->id,
+                    'execution_time_ms' => $log->execution_time_ms,
+                ];
+            }
+        }
+
+        return $anomalies;
+    }
+
+    public function cleanupOldLogs(int $accountId, int $retentionDays): int
+    {
+        return PassKitAuditLog::where('account_id', $accountId)
+            ->where('created_at', '<', now()->subDays($retentionDays))
             ->delete();
     }
 
-    // Protected helper methods
-
-    protected function determineSource(): string
+    public function archiveOldLogs(int $accountId, int $retentionDays): int
     {
-        if (app()->runningInConsole()) {
-            return 'command';
+        $logs = PassKitAuditLog::where('account_id', $accountId)
+            ->where('created_at', '<', now()->subDays($retentionDays))
+            ->where('archived', false)
+            ->get();
+
+        foreach ($logs as $log) {
+            $log->update(['archived' => true, 'archived_at' => now()]);
         }
-        
-        if (request()->is('api/*')) {
-            return 'api';
-        }
-        
-        if (request()->header('X-Webhook-Source')) {
-            return 'webhook';
-        }
-        
-        return 'web';
+
+        return $logs->count();
     }
 
-    protected function determineUserType(): ?string
+    public function cleanupWithRetentionPolicies(int $accountId, array $policies): int
     {
-        if (!Auth::check()) {
-            return 'anonymous';
-        }
-        
-        $user = Auth::user();
-        
-        if (method_exists($user, 'isAdmin') && $user->isAdmin()) {
-            return 'admin';
-        }
-        
-        return 'user';
+        $gdprDays = $policies['gdpr_retention_days'] ?? 2555;
+        $defaultDays = $policies['default_retention_days'] ?? 365;
+
+        $deleted = 0;
+
+        $deleted += PassKitAuditLog::where('account_id', $accountId)
+            ->where('gdpr_relevant', true)
+            ->where('created_at', '<', now()->subDays($gdprDays))
+            ->delete();
+
+        $deleted += PassKitAuditLog::where('account_id', $accountId)
+            ->where('gdpr_relevant', false)
+            ->where('created_at', '<', now()->subDays($defaultDays))
+            ->delete();
+
+        return $deleted;
     }
 
-    protected function determineSecurityLevel(array $data): string
+    protected function normalizeLogAttributes(array $data): array
     {
-        if (isset($data['passkit_operation']) || isset($data['financial_data'])) {
-            return 'high';
-        }
-        
-        if (isset($data['pii_data']) && $data['pii_data']) {
-            return 'high';
-        }
-        
-        if (in_array($data['event_type'] ?? '', ['security_event', 'compliance_check'])) {
-            return 'critical';
-        }
-        
-        return 'normal';
-    }
+        $columns = [
+            'account_id', 'event_type', 'entity_type', 'entity_id', 'passkit_id',
+            'user_id', 'user_type', 'source', 'ip_address', 'user_agent',
+            'operation', 'description', 'status', 'error_message', 'error_details',
+            'old_values', 'new_values', 'metadata', 'request_data', 'response_data',
+            'execution_time_ms', 'correlation_id', 'session_id', 'batch_id',
+            'passkit_operation', 'passkit_response_code', 'passkit_response_time_ms',
+            'passkit_request_headers', 'passkit_response_headers',
+            'data_validated', 'validation_errors', 'checksum', 'sensitive_data_masked',
+            'workflow_step', 'business_context', 'business_impact_score', 'tags',
+            'security_level', 'requires_approval', 'approved_by', 'approved_at',
+            'gdpr_relevant', 'pci_relevant',
+            'expires_at', 'archived', 'archived_at', 'archive_reason',
+        ];
 
-    protected function calculateBusinessImpact(array $data): float
-    {
-        $impact = 10.0; // Base impact
-        
-        // Increase impact for critical operations
-        if (in_array($data['event_type'] ?? '', ['member_delete', 'program_delete', 'security_event'])) {
-            $impact += 30.0;
-        }
-        
-        // Increase impact for financial operations
-        if (isset($data['financial_data']) && $data['financial_data']) {
-            $impact += 20.0;
-        }
-        
-        // Increase impact for failed operations
-        if (($data['status'] ?? '') === 'failed') {
-            $impact += 15.0;
-        }
-        
-        return min(100.0, $impact);
-    }
+        $attrs = array_intersect_key($data, array_flip($columns));
 
-    protected function containsSensitiveData(array $data): bool
-    {
-        $sensitiveFields = ['password', 'email', 'phone', 'ssn', 'credit_card', 'api_key', 'token'];
-        
-        foreach ($data as $key => $value) {
-            if (is_string($key)) {
-                foreach ($sensitiveFields as $sensitiveField) {
-                    if (stripos($key, $sensitiveField) !== false) {
-                        return true;
-                    }
-                }
-            }
-        }
-        
-        return false;
-    }
+        $extras = array_diff_key($data, array_flip($columns));
+        unset($extras['created_at'], $extras['updated_at']);
 
-    protected function maskSensitiveData(array $data): array
-    {
-        $sensitiveFields = ['password', 'email', 'phone', 'ssn', 'credit_card', 'api_key', 'token'];
-        
-        foreach ($data as $key => $value) {
-            if (is_string($key)) {
-                foreach ($sensitiveFields as $sensitiveField) {
-                    if (stripos($key, $sensitiveField) !== false) {
-                        $data[$key] = $this->maskValue($value);
-                    }
-                }
-            }
+        if (!empty($extras)) {
+            $attrs['metadata'] = array_merge((array) ($attrs['metadata'] ?? []), $extras);
         }
-        
-        return $data;
-    }
 
-    protected function maskValue($value): string
-    {
-        if (!is_string($value)) {
-            return '[MASKED]';
-        }
-        
-        if (strlen($value) <= 4) {
-            return str_repeat('*', strlen($value));
-        }
-        
-        return substr($value, 0, 2) . str_repeat('*', strlen($value) - 4) . substr($value, -2);
-    }
+        $attrs['correlation_id'] = $attrs['correlation_id'] ?? (string) Str::uuid();
+        $attrs['source'] = $attrs['source'] ?? 'api';
+        $attrs['operation'] = $attrs['operation'] ?? ($data['event_type'] ?? 'unknown');
+        $attrs['status'] = $attrs['status'] ?? 'success';
+        $attrs['event_type'] = $attrs['event_type'] ?? 'event';
+        $attrs['entity_type'] = $attrs['entity_type'] ?? 'system';
 
-    protected function generateChecksum(array $data): string
-    {
-        $sanitizedData = $data;
-        unset($sanitizedData['created_at'], $sanitizedData['updated_at'], $sanitizedData['id']);
-        
-        return hash('sha256', json_encode($sanitizedData, JSON_SORT_KEYS));
-    }
-
-    protected function createRelatedLogs(PassKitAuditLog $auditLog, array $data): void
-    {
-        // Auto-create performance log for long-running operations
-        if (($data['execution_time_ms'] ?? 0) > 1000) {
-            PassKitPerformanceLog::create([
-                'audit_log_id' => $auditLog->id,
-                'account_id' => $data['account_id'] ?? 0,
-                'operation_type' => $data['operation'] ?? 'unknown',
-                'duration_ms' => $data['execution_time_ms'],
-                'performance_threshold_exceeded' => true,
-                'performance_grade' => 'D',
-                'performance_score' => 25.0,
-            ]);
-        }
-    }
-
-    protected function serializeValue($value): string
-    {
-        if (is_null($value)) {
-            return '[NULL]';
-        }
-        
-        if (is_bool($value)) {
-            return $value ? '[TRUE]' : '[FALSE]';
-        }
-        
-        if (is_array($value) || is_object($value)) {
-            return json_encode($value);
-        }
-        
-        return (string) $value;
-    }
-
-    protected function classifyData(string $columnName, $value): string
-    {
-        $confidentialColumns = ['password', 'token', 'secret', 'key'];
-        $restrictedColumns = ['ssn', 'credit_card', 'bank_account'];
-        $internalColumns = ['email', 'phone', 'address'];
-        
-        $columnLower = strtolower($columnName);
-        
-        foreach ($restrictedColumns as $restricted) {
-            if (stripos($columnLower, $restricted) !== false) {
-                return 'restricted';
-            }
-        }
-        
-        foreach ($confidentialColumns as $confidential) {
-            if (stripos($columnLower, $confidential) !== false) {
-                return 'confidential';
-            }
-        }
-        
-        foreach ($internalColumns as $internal) {
-            if (stripos($columnLower, $internal) !== false) {
-                return 'internal';
-            }
-        }
-        
-        return 'public';
-    }
-
-    protected function isPiiData(string $columnName, $value): bool
-    {
-        $piiColumns = ['email', 'phone', 'first_name', 'last_name', 'address', 'ssn', 'date_of_birth'];
-        
-        foreach ($piiColumns as $piiColumn) {
-            if (stripos($columnName, $piiColumn) !== false) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-
-    protected function isFinancialData(string $columnName, $value): bool
-    {
-        $financialColumns = ['credit_card', 'bank_account', 'points', 'balance', 'amount', 'payment'];
-        
-        foreach ($financialColumns as $financialColumn) {
-            if (stripos($columnName, $financialColumn) !== false) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-
-    protected function isSensitiveData(string $columnName, $value): bool
-    {
-        return $this->isPiiData($columnName, $value) || 
-               $this->isFinancialData($columnName, $value) ||
-               in_array($this->classifyData($columnName, $value), ['confidential', 'restricted']);
-    }
-
-    protected function assessChangeImpact(string $tableName, string $columnName, $oldValue, $newValue): string
-    {
-        // Critical impact for certain tables/columns
-        $criticalTables = ['passkit_members', 'passkit_transactions'];
-        $criticalColumns = ['points_balance', 'status', 'passkit_id'];
-        
-        if (in_array($tableName, $criticalTables) && in_array($columnName, $criticalColumns)) {
-            return 'critical';
-        }
-        
-        // High impact for financial or PII data
-        if ($this->isFinancialData($columnName, $newValue) || $this->isPiiData($columnName, $newValue)) {
-            return 'high';
-        }
-        
-        return 'medium';
-    }
-
-    protected function requiresNotification(string $tableName, string $columnName): bool
-    {
-        $notificationTables = ['passkit_members', 'passkit_transactions', 'pass_kit_programs'];
-        $notificationColumns = ['status', 'points_balance', 'tier_id'];
-        
-        return in_array($tableName, $notificationTables) && in_array($columnName, $notificationColumns);
-    }
-
-    protected function requiresApproval(string $tableName, string $columnName): bool
-    {
-        $approvalColumns = ['points_balance', 'status', 'tier_id'];
-        
-        return in_array($columnName, $approvalColumns);
-    }
-
-    protected function calculatePerformanceGrade(float $durationMs, array $metrics): string
-    {
-        $threshold = $metrics['threshold_ms'] ?? 1000;
-        
-        if ($durationMs <= $threshold * 0.5) return 'A';
-        if ($durationMs <= $threshold * 0.75) return 'B';
-        if ($durationMs <= $threshold) return 'C';
-        if ($durationMs <= $threshold * 2) return 'D';
-        
-        return 'F';
-    }
-
-    protected function calculatePerformanceScore(float $durationMs, array $metrics): float
-    {
-        $threshold = $metrics['threshold_ms'] ?? 1000;
-        $ratio = $durationMs / $threshold;
-        
-        if ($ratio <= 0.5) return 100.0;
-        if ($ratio <= 1.0) return max(50.0, 100.0 - ($ratio - 0.5) * 100);
-        
-        return max(0.0, 50.0 - ($ratio - 1.0) * 25);
-    }
-
-    protected function sanitizeApiData(array $data): array
-    {
-        // Remove sensitive fields from API logging
-        $sensitiveKeys = ['password', 'token', 'key', 'secret', 'credential'];
-        
-        foreach ($data as $key => $value) {
-            foreach ($sensitiveKeys as $sensitiveKey) {
-                if (stripos($key, $sensitiveKey) !== false) {
-                    $data[$key] = '[REDACTED]';
-                }
-            }
-            
-            if (is_array($value)) {
-                $data[$key] = $this->sanitizeApiData($value);
-            }
-        }
-        
-        return $data;
+        return $attrs;
     }
 }

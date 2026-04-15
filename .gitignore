@@ -1,0 +1,27 @@
+# Composer
+/vendor/
+composer.lock
+
+# Testing
+/.phpunit.cache/
+/.phpunit.result.cache
+/coverage-html/
+coverage.txt
+tests-junit.xml
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# AI assistant working directories
+.serena/
+.claude/
+.claude-flow/
+.swarm/
+.aider*
+.cursor/
+.roo/
+.windsurf/

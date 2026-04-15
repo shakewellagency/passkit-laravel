@@ -50,6 +50,7 @@ class PassKitMember extends Model
         'tags',
         'passkit_data',
         'last_sync_at',
+        'sync_pending',
     ];
 
     protected $casts = [
@@ -66,6 +67,7 @@ class PassKitMember extends Model
         'sms_opt_in' => 'boolean',
         'push_opt_in' => 'boolean',
         'tier_progress' => 'decimal:2',
+        'sync_pending' => 'boolean',
     ];
 
     // Relationships
@@ -110,6 +112,21 @@ class PassKitMember extends Model
         return $query->where('opt_in_status', 'opted_in');
     }
 
+    public function scopeByTier($query, $tierId)
+    {
+        return $query->where('tier_id', $tierId);
+    }
+
+    public function scopeEnrolledAfter($query, $date)
+    {
+        return $query->where('enrolled_at', '>=', $date);
+    }
+
+    public function scopePointsBetween($query, int $min, int $max)
+    {
+        return $query->whereBetween('points_balance', [$min, $max]);
+    }
+
     // Accessors
     public function getFullNameAttribute(): string
     {
@@ -121,10 +138,51 @@ class PassKitMember extends Model
         return number_format($this->points_balance);
     }
 
+    public function getIsActiveAttribute(): bool
+    {
+        return $this->status === 'active';
+    }
+
+    public function getDaysSinceEnrollmentAttribute(): ?int
+    {
+        return $this->enrolled_at?->diffInDays(now());
+    }
+
     // Methods
+    public function activate(): void
+    {
+        $this->status = 'active';
+        $this->save();
+    }
+
+    public function deactivate(): void
+    {
+        $this->status = 'inactive';
+        $this->save();
+    }
+
     public function updateActivity(): void
     {
         $this->update(['last_activity_at' => now()]);
+    }
+
+    public function updateLastActivity(): void
+    {
+        $this->updateActivity();
+    }
+
+    public function getTotalEarnedPoints(): int
+    {
+        return (int) $this->transactions()
+            ->where('transaction_type', 'earn')
+            ->sum('points_amount');
+    }
+
+    public function getTotalSpentPoints(): int
+    {
+        return (int) abs($this->transactions()
+            ->where('transaction_type', 'burn')
+            ->sum('points_amount'));
     }
 
     public function addPoints(int $points, string $description = null): PassKitTransaction
@@ -152,7 +210,7 @@ class PassKitMember extends Model
     public function subtractPoints(int $points, string $description = null): PassKitTransaction
     {
         if ($this->points_balance < $points) {
-            throw new \Exception('Insufficient points balance');
+            throw new \InvalidArgumentException('Insufficient points balance');
         }
 
         $transaction = $this->transactions()->create([

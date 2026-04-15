@@ -10,6 +10,8 @@ class PassKitPerformanceLog extends Model
 {
     use HasFactory;
 
+    protected $table = 'passkit_performance_logs';
+
     protected $fillable = [
         'audit_log_id',
         'account_id',
@@ -41,14 +43,14 @@ class PassKitPerformanceLog extends Model
     ];
 
     protected $casts = [
-        'duration_ms' => 'decimal:3',
-        'api_call_time_ms' => 'decimal:3',
-        'database_time_ms' => 'decimal:3',
-        'validation_time_ms' => 'decimal:3',
-        'records_per_second' => 'decimal:2',
-        'data_transfer_rate_mbps' => 'decimal:3',
-        'success_rate_percent' => 'decimal:2',
-        'cache_hit_rate_percent' => 'decimal:2',
+        'duration_ms' => 'float',
+        'api_call_time_ms' => 'float',
+        'database_time_ms' => 'float',
+        'validation_time_ms' => 'float',
+        'records_per_second' => 'float',
+        'data_transfer_rate_mbps' => 'float',
+        'success_rate_percent' => 'float',
+        'cache_hit_rate_percent' => 'float',
         'performance_score' => 'decimal:2',
         'system_load_average' => 'decimal:2',
         'performance_details' => 'array',
