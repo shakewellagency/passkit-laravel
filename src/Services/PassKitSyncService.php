@@ -182,7 +182,7 @@ class PassKitSyncService
         return (array) $this->passKitService->updateTransaction($transaction->passkit_transaction_id, $payload);
     }
 
-    public function syncPassFromApi(string $passkitId, int $userId, int $accountId): ?WalletPass
+    public function syncPassFromApi(string $passkitId, ?int $userId, int $accountId): ?WalletPass
     {
         try {
             $data = $this->passKitService->getPass($passkitId);
@@ -203,6 +203,22 @@ class PassKitSyncService
         if ($pass) {
             $pass->update($attributes);
         } else {
+            // user_id is only required when creating a brand-new local
+            // pass record. The bulk-sync caller (performFullSync) iterates
+            // existing local rows so the update branch is the common path.
+            // If we hit the create branch with a null user_id we have no
+            // way to attach the pass to a user — skip with a clear log
+            // rather than coercing to 0 and creating an orphan.
+            if ($userId === null) {
+                $this->logSyncFailure(
+                    'wallet_pass',
+                    $passkitId,
+                    $accountId,
+                    'Cannot create new local WalletPass: userId is null and no existing local pass to update.'
+                );
+                return null;
+            }
+
             $pass = WalletPass::create(array_merge([
                 'passkit_id' => $passkitId,
                 'user_id' => $userId,
