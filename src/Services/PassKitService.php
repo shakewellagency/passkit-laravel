@@ -2029,5 +2029,115 @@ class PassKitService
             'created_by' => $userId
         ]);
     }
-    
+
+    // ------------------------------------------------------------------
+    // v2 sync-service shim methods.
+    //
+    // PassKitSyncService (v2.0.0) calls six methods on this service that
+    // were never implemented when the sync service was rewritten:
+    //
+    //   updateMember, getMemberTransactions, updateTransaction,
+    //   getPass, updatePass, getMembersSince
+    //
+    // Without these, every scheduled cron tick dies with
+    // "Call to undefined method ...". Each callsite in
+    // PassKitSyncService passes the result through `(array)` casts and
+    // ignores empty/no-op results gracefully (the per-account loop
+    // already reports "0 members, 0 transactions, 0 passes synced" for
+    // every account on environments where the cron has been broken).
+    //
+    // These stubs return safe empty/no-op defaults and log a warning
+    // so the cron completes and we can see who is calling what. The
+    // TODO blocks point at the closest gRPC SDK method to use when
+    // someone with PassKit domain knowledge implements them properly.
+    // ------------------------------------------------------------------
+
+    /**
+     * TODO: implement via $this->membershipClient->updateMember(\Members\Member).
+     * Need to construct a Member proto from $payload and merge $passkitId in.
+     */
+    public function updateMember(string $passkitId, array $payload): array
+    {
+        Log::warning('PassKitService::updateMember stub called', [
+            'passkit_id' => $passkitId,
+            'payload_keys' => array_keys($payload),
+        ]);
+
+        return $payload;
+    }
+
+    /**
+     * TODO: implement via $this->membershipClient->listMemberEvents(\Members\ListRequest)
+     * filtered to the member ID. PassKit treats earn/burn/check-in/etc as events,
+     * not transactions per se — confirm semantic mapping with PassKit docs first.
+     */
+    public function getMemberTransactions(string $passkitId): array
+    {
+        Log::warning('PassKitService::getMemberTransactions stub called — returning []', [
+            'passkit_id' => $passkitId,
+        ]);
+
+        return [];
+    }
+
+    /**
+     * TODO: PassKit gRPC SDK exposes no direct "update transaction" method.
+     * Transactions in PassKit are typically immutable events (earnPoints,
+     * burnPoints, setPoints). If the host app needs transaction edits,
+     * model them as compensating events rather than in-place updates.
+     */
+    public function updateTransaction(string $transactionId, array $payload): array
+    {
+        Log::warning('PassKitService::updateTransaction stub called — no-op', [
+            'transaction_id' => $transactionId,
+            'payload_keys' => array_keys($payload),
+        ]);
+
+        return $payload;
+    }
+
+    /**
+     * TODO: in PassKit a "wallet pass" IS a member record — this should
+     * delegate to $this->getMember($passkitId) and return the same
+     * Members\Member proto. Left as a stub for now to avoid coupling
+     * pass-sync timing to member-sync timing during cron rehabilitation.
+     */
+    public function getPass(string $passkitId): ?array
+    {
+        Log::warning('PassKitService::getPass stub called — returning null', [
+            'passkit_id' => $passkitId,
+        ]);
+
+        return null;
+    }
+
+    /**
+     * TODO: in PassKit a "wallet pass" IS a member record — this should
+     * delegate to $this->updateMember(...).
+     */
+    public function updatePass(string $passkitId, array $payload): array
+    {
+        Log::warning('PassKitService::updatePass stub called', [
+            'passkit_id' => $passkitId,
+            'payload_keys' => array_keys($payload),
+        ]);
+
+        return $payload;
+    }
+
+    /**
+     * TODO: implement via $this->membershipClient->listMembers(\Members\ListRequest)
+     * with a date filter built from $since (ISO 8601). The SDK supports
+     * Filters but the exact date-field semantic depends on which
+     * timestamp PassKit indexes (createdAt vs updatedAt).
+     */
+    public function getMembersSince(string $since): array
+    {
+        Log::warning('PassKitService::getMembersSince stub called — returning []', [
+            'since' => $since,
+        ]);
+
+        return [];
+    }
+
 }
