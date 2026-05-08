@@ -4,6 +4,7 @@ namespace ShakewellAgency\PassKitLaravel\Services;
 
 use ShakewellAgency\PassKitLaravel\Models\PassKitAuditLog;
 use ShakewellAgency\PassKitLaravel\Models\PassKitMember;
+use ShakewellAgency\PassKitLaravel\Models\PassKitSyncLog;
 use ShakewellAgency\PassKitLaravel\Models\PassKitTransaction;
 use ShakewellAgency\PassKitLaravel\Models\WalletPass;
 use Illuminate\Support\Facades\Log;
@@ -263,32 +264,81 @@ class PassKitSyncService
 
     public function performFullSync(int $accountId): array
     {
-        $memberResults = $this->syncAllMembers($accountId);
+        $log = PassKitSyncLog::create([
+            'account_id' => $accountId,
+            'sync_type' => 'full',
+            'sync_direction' => 'import',
+            'status' => 'in_progress',
+            'started_at' => now(),
+            'trigger_source' => app()->runningInConsole() ? 'cron' : 'api',
+        ]);
 
-        $transactionSynced = 0;
-        $transactionSkipped = 0;
-        foreach (PassKitMember::byAccount($accountId)->get() as $member) {
-            $result = $this->syncTransactionsFromApi($member);
-            $transactionSynced += $result['synced'];
-            $transactionSkipped += $result['skipped'];
-        }
+        try {
+            $memberResults = $this->syncAllMembers($accountId);
 
-        $passSynced = 0;
-        $passFailed = 0;
-        foreach (WalletPass::where('account_id', $accountId)->get() as $pass) {
-            $result = $this->syncPassFromApi($pass->passkit_id, $pass->user_id, $accountId);
-            if ($result !== null) {
-                $passSynced++;
-            } else {
-                $passFailed++;
+            $transactionSynced = 0;
+            $transactionSkipped = 0;
+            foreach (PassKitMember::byAccount($accountId)->get() as $member) {
+                $result = $this->syncTransactionsFromApi($member);
+                $transactionSynced += $result['synced'];
+                $transactionSkipped += $result['skipped'];
             }
-        }
 
-        return [
-            'members' => $memberResults,
-            'transactions' => ['synced' => $transactionSynced, 'skipped' => $transactionSkipped],
-            'passes' => ['synced' => $passSynced, 'failed' => $passFailed],
-        ];
+            $passSynced = 0;
+            $passFailed = 0;
+            foreach (WalletPass::where('account_id', $accountId)->get() as $pass) {
+                $result = $this->syncPassFromApi($pass->passkit_id, $pass->user_id, $accountId);
+                if ($result !== null) {
+                    $passSynced++;
+                } else {
+                    $passFailed++;
+                }
+            }
+
+            $summary = [
+                'members' => $memberResults,
+                'transactions' => ['synced' => $transactionSynced, 'skipped' => $transactionSkipped],
+                'passes' => ['synced' => $passSynced, 'failed' => $passFailed],
+            ];
+
+            $memberSynced = (int) ($memberResults['synced'] ?? 0);
+            $memberFailed = (int) ($memberResults['failed'] ?? 0);
+
+            $totalSucceeded = $memberSynced + $transactionSynced + $passSynced;
+            $totalFailed = $memberFailed + $passFailed;
+            $totalProcessed = $totalSucceeded + $totalFailed + $transactionSkipped;
+
+            $completedAt = now();
+            $duration = max(0, $completedAt->diffInSeconds($log->started_at));
+
+            $log->update([
+                'status' => 'completed',
+                'completed_at' => $completedAt,
+                'duration_seconds' => $duration,
+                'total_records' => $totalProcessed,
+                'processed_records' => $totalProcessed,
+                'successful_records' => $totalSucceeded,
+                'failed_records' => $totalFailed,
+                'skipped_records' => $transactionSkipped,
+                'records_per_second' => $duration > 0 ? round($totalProcessed / $duration, 2) : null,
+                'changes_summary' => $summary,
+            ]);
+
+            return $summary;
+        } catch (\Throwable $e) {
+            $log->update([
+                'status' => 'failed',
+                'completed_at' => now(),
+                'error_message' => $e->getMessage(),
+                'error_details' => [
+                    'class' => get_class($e),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ],
+            ]);
+
+            throw $e;
+        }
     }
 
     public function syncSince(int $accountId, $since): array
