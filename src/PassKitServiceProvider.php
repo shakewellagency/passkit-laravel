@@ -75,7 +75,15 @@ class PassKitServiceProvider extends ServiceProvider
     }
 
     /**
-     * Register PassKit sync scheduled tasks
+     * Register PassKit sync scheduled tasks.
+     *
+     * v2.0.0 dropped the `--type=*` parameter on PassKitSyncCommand in
+     * favour of discrete flags (--members-only, --transactions-only,
+     * --passes-only, --since, --force, --account). The schedule entries
+     * here mirror that change. The previous `--type=programs` and
+     * `--type=templates` schedules are removed because v2.0.0 has no
+     * granular program/template-only sync mode — programs and templates
+     * are kept in sync as a side-effect of the default full sync.
      */
     protected function registerScheduledTasks(Schedule $schedule): void
     {
@@ -84,8 +92,10 @@ class PassKitServiceProvider extends ServiceProvider
             return;
         }
 
-        // Incremental sync every 15 minutes (most frequent)
-        $schedule->command('passkit:sync --type=incremental')
+        // Default sync every 15 minutes (most frequent). Default behaviour
+        // is performFullSync() throttled by recent-sync timestamps, so this
+        // is effectively the v1 "incremental" cadence.
+        $schedule->command('passkit:sync')
             ->everyFifteenMinutes()
             ->withoutOverlapping(10) // 10 minute timeout
             ->runInBackground()
@@ -93,7 +103,7 @@ class PassKitServiceProvider extends ServiceProvider
             ->appendOutputTo(storage_path('logs/passkit-incremental-sync.log'));
 
         // Member sync every hour
-        $schedule->command('passkit:sync --type=members')
+        $schedule->command('passkit:sync --members-only')
             ->hourly()
             ->withoutOverlapping(30)
             ->runInBackground()
@@ -101,30 +111,27 @@ class PassKitServiceProvider extends ServiceProvider
             ->appendOutputTo(storage_path('logs/passkit-member-sync.log'));
 
         // Transaction sync every 2 hours
-        $schedule->command('passkit:sync --type=transactions')
+        $schedule->command('passkit:sync --transactions-only')
             ->everyTwoHours()
             ->withoutOverlapping(45)
             ->runInBackground()
             ->onOneServer()
             ->appendOutputTo(storage_path('logs/passkit-transaction-sync.log'));
 
-        // Program and template sync every 6 hours (less frequent)
-        $schedule->command('passkit:sync --type=programs')
-            ->everySixHours()
-            ->withoutOverlapping(20)
+        // Pass sync every 4 hours. Replaces the v1 `--type=programs` and
+        // `--type=templates` slots; passes are the only granular target
+        // remaining in v2 that benefits from a more-frequent cadence than
+        // the daily full sync.
+        $schedule->command('passkit:sync --passes-only')
+            ->cron('15 */4 * * *')
+            ->withoutOverlapping(30)
             ->runInBackground()
             ->onOneServer()
-            ->appendOutputTo(storage_path('logs/passkit-program-sync.log'));
+            ->appendOutputTo(storage_path('logs/passkit-pass-sync.log'));
 
-        $schedule->command('passkit:sync --type=templates')
-            ->cron('30 */6 * * *') // Every 6 hours, offset by 30 minutes from programs
-            ->withoutOverlapping(20)
-            ->runInBackground()
-            ->onOneServer()
-            ->appendOutputTo(storage_path('logs/passkit-template-sync.log'));
-
-        // Full sync once daily at 2 AM
-        $schedule->command('passkit:sync --type=full --force')
+        // Full sync once daily at 2 AM (force = ignore recent-sync
+        // timestamps; equivalent to v1 `--type=full --force`).
+        $schedule->command('passkit:sync --force')
             ->dailyAt('02:00')
             ->withoutOverlapping(120) // 2 hour timeout for full sync
             ->runInBackground()
@@ -133,7 +140,7 @@ class PassKitServiceProvider extends ServiceProvider
             ->appendOutputTo(storage_path('logs/passkit-full-sync.log'));
 
         // Weekly deep sync with cleanup (Sundays at 3 AM)
-        $schedule->command('passkit:sync --type=full --force')
+        $schedule->command('passkit:sync --force')
             ->weeklyOn(0, '03:00') // Sunday at 3 AM
             ->withoutOverlapping(180) // 3 hour timeout
             ->runInBackground()
