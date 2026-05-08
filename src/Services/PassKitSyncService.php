@@ -48,6 +48,13 @@ class PassKitSyncService
             return null;
         }
 
+        // PassKitService::getMember() returns either a protobuf message
+        // (real gRPC path) or an array (testingMode mock). Normalise to
+        // array before handing to mapApiMemberToAttributes(array $data).
+        if ($data instanceof \Google\Protobuf\Internal\Message) {
+            $data = json_decode($data->serializeToJsonString(), true) ?? [];
+        }
+
         $member = PassKitMember::where('passkit_id', $passkitId)->first();
         $attributes = $this->mapApiMemberToAttributes($data, $accountId);
 
