@@ -151,6 +151,21 @@ class PassKitSyncService
 
     public function syncTransactionsFromApi(PassKitMember $member): array
     {
+        // Mirrors the null-passkit_id guard from syncAllMembers (PR #8) —
+        // members can exist locally without a remote passkit_id (signup
+        // created the row ahead of upstream provisioning, or the upstream
+        // record was deleted and the local row was kept). getMemberTransactions
+        // has a strict string type-hint, so calling with null throws
+        // TypeError and aborts performFullSync's whole transaction loop.
+        if (empty($member->passkit_id)) {
+            Log::warning('syncTransactionsFromApi skipping member with no passkit_id', [
+                'member_id' => $member->id,
+                'account_id' => $member->account_id,
+            ]);
+
+            return ['synced' => 0, 'skipped' => 0];
+        }
+
         $transactions = (array) $this->passKitService->getMemberTransactions($member->passkit_id);
 
         $synced = 0;
