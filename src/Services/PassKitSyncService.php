@@ -97,7 +97,23 @@ class PassKitSyncService
         $synced = 0;
         $failed = 0;
 
+        $skipped = 0;
         foreach ($members as $member) {
+            // PassKitMember rows can exist locally without a remote
+            // passkit_id (signup created the member ahead of upstream
+            // provisioning, or the upstream record was deleted and the
+            // local row was kept). syncMemberFromApi requires a string
+            // id by signature; skip such rows with a warning so the
+            // rest of the batch still processes.
+            if (empty($member->passkit_id)) {
+                Log::warning('syncAllMembers skipping member with no passkit_id', [
+                    'member_id' => $member->id,
+                    'account_id' => $accountId,
+                ]);
+                $skipped++;
+                continue;
+            }
+
             $result = $this->syncMemberFromApi($member->passkit_id, $accountId);
             if ($result !== null) {
                 $synced++;
@@ -109,6 +125,7 @@ class PassKitSyncService
         return [
             'synced' => $synced,
             'failed' => $failed,
+            'skipped' => $skipped,
             'batches_processed' => $members->count() > 0 ? (int) ceil($members->count() / max(1, $batchSize)) : 0,
         ];
     }
