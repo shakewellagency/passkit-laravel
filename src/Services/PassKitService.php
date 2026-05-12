@@ -2031,7 +2031,7 @@ class PassKitService
     }
 
     // ------------------------------------------------------------------
-    // v2 sync-service shim methods.
+    // v2 sync-service shim methods — DEPRECATED.
     //
     // PassKitSyncService (v2.0.0) calls six methods on this service that
     // were never implemented when the sync service was rewritten:
@@ -2039,26 +2039,40 @@ class PassKitService
     //   updateMember, getMemberTransactions, updateTransaction,
     //   getPass, updatePass, getMembersSince
     //
-    // Without these, every scheduled cron tick dies with
-    // "Call to undefined method ...". Each callsite in
-    // PassKitSyncService passes the result through `(array)` casts and
-    // ignores empty/no-op results gracefully (the per-account loop
-    // already reports "0 members, 0 transactions, 0 passes synced" for
-    // every account on environments where the cron has been broken).
+    // After staging discovery (2026-05-08, post-app-PR #336) and the
+    // strategic move toward direct Apple Wallet + Google Wallet
+    // integration, these six methods are formally deprecated rather
+    // than implemented. See ClickUp 86d2y1txx for the full triage.
     //
-    // These stubs return safe empty/no-op defaults and log a warning
-    // so the cron completes and we can see who is calling what. The
-    // TODO blocks point at the closest gRPC SDK method to use when
-    // someone with PassKit domain knowledge implements them properly.
+    // Per-cron-tick observed call counts on staging:
+    //   getPass: 977, getMemberTransactions: 913,
+    //   updateMember/updateTransaction/updatePass/getMembersSince: 0
+    //
+    // The two read-side hot paths (getPass, getMemberTransactions)
+    // CANNOT be safely aliased to existing methods — the consumer reads
+    // pass-shaped fields (status, data, installed, device_type,
+    // member_id) that getMember does not provide; aliasing would
+    // silently overwrite local data with defaults. The four write-side
+    // methods have zero callers in v2 and no clean gRPC mapping
+    // (PassKit events are immutable; "pass updates" don't exist as
+    // first-class operations).
+    //
+    // All six remain as no-ops that emit DEPRECATED warnings so callers
+    // surface in observability and can be migrated/removed by the host
+    // app. They will be removed entirely in a future major release once
+    // the consuming PassKitSyncService callsites are cleaned up.
     // ------------------------------------------------------------------
 
     /**
-     * TODO: implement via $this->membershipClient->updateMember(\Members\Member).
-     * Need to construct a Member proto from $payload and merge $passkitId in.
+     * @deprecated since v2.x — no v2 caller reaches this method (0 hits
+     *   per cron run on staging). Constructing a \Members\Member proto
+     *   from the loose $payload array has no clean mapping. See
+     *   https://app.clickup.com/t/86d2y1txx. Will be removed once
+     *   PassKitSyncService callsites are cleaned up.
      */
     public function updateMember(string $passkitId, array $payload): array
     {
-        Log::warning('PassKitService::updateMember stub called', [
+        Log::warning('DEPRECATED PassKitService::updateMember stub — see ClickUp 86d2y1txx', [
             'passkit_id' => $passkitId,
             'payload_keys' => array_keys($payload),
         ]);
@@ -2067,13 +2081,17 @@ class PassKitService
     }
 
     /**
-     * TODO: implement via $this->membershipClient->listMemberEvents(\Members\ListRequest)
-     * filtered to the member ID. PassKit treats earn/burn/check-in/etc as events,
-     * not transactions per se — confirm semantic mapping with PassKit docs first.
+     * @deprecated since v2.x — closest gRPC analog is
+     *   listMemberEvents(\Members\ListRequest), but PassKit "events"
+     *   (earnPoints, burnPoints, check-in, check-out) do not map cleanly
+     *   to "transactions" in the host app's domain. Needs PassKit-side
+     *   semantic guidance before implementation. Currently 913 hits per
+     *   cron tick on staging — noise only, no functional impact. See
+     *   https://app.clickup.com/t/86d2y1txx.
      */
     public function getMemberTransactions(string $passkitId): array
     {
-        Log::warning('PassKitService::getMemberTransactions stub called — returning []', [
+        Log::warning('DEPRECATED PassKitService::getMemberTransactions stub — see ClickUp 86d2y1txx', [
             'passkit_id' => $passkitId,
         ]);
 
@@ -2081,14 +2099,15 @@ class PassKitService
     }
 
     /**
-     * TODO: PassKit gRPC SDK exposes no direct "update transaction" method.
-     * Transactions in PassKit are typically immutable events (earnPoints,
-     * burnPoints, setPoints). If the host app needs transaction edits,
-     * model them as compensating events rather than in-place updates.
+     * @deprecated since v2.x — PassKit gRPC SDK exposes no direct
+     *   "update transaction" method. Transactions in PassKit are
+     *   immutable events; edits should be modelled as compensating
+     *   events. Zero v2 callers. See
+     *   https://app.clickup.com/t/86d2y1txx.
      */
     public function updateTransaction(string $transactionId, array $payload): array
     {
-        Log::warning('PassKitService::updateTransaction stub called — no-op', [
+        Log::warning('DEPRECATED PassKitService::updateTransaction stub — see ClickUp 86d2y1txx', [
             'transaction_id' => $transactionId,
             'payload_keys' => array_keys($payload),
         ]);
@@ -2097,14 +2116,19 @@ class PassKitService
     }
 
     /**
-     * TODO: in PassKit a "wallet pass" IS a member record — this should
-     * delegate to $this->getMember($passkitId) and return the same
-     * Members\Member proto. Left as a stub for now to avoid coupling
-     * pass-sync timing to member-sync timing during cron rehabilitation.
+     * @deprecated since v2.x — earlier TODO suggested aliasing to
+     *   getMember() but consumer (syncPassFromApi) reads pass-shaped
+     *   fields (status, data, installed, device_type, member_id) that
+     *   the \Members\Member proto does not provide. Aliasing would
+     *   silently overwrite local pass data with defaults — worse than
+     *   current behaviour. Needs a survey of the gRPC Templates/Passes
+     *   client for the wallet-pass-shaped read. Currently 977 hits per
+     *   cron tick on staging — noise only, no functional impact. See
+     *   https://app.clickup.com/t/86d2y1txx.
      */
     public function getPass(string $passkitId): ?array
     {
-        Log::warning('PassKitService::getPass stub called — returning null', [
+        Log::warning('DEPRECATED PassKitService::getPass stub — see ClickUp 86d2y1txx', [
             'passkit_id' => $passkitId,
         ]);
 
@@ -2112,12 +2136,15 @@ class PassKitService
     }
 
     /**
-     * TODO: in PassKit a "wallet pass" IS a member record — this should
-     * delegate to $this->updateMember(...).
+     * @deprecated since v2.x — same reasoning as getPass(): a PassKit
+     *   "pass" is not equivalent to a Member proto for the consumer's
+     *   purposes, so delegating to updateMember() would corrupt local
+     *   pass-only fields. Zero v2 callers. See
+     *   https://app.clickup.com/t/86d2y1txx.
      */
     public function updatePass(string $passkitId, array $payload): array
     {
-        Log::warning('PassKitService::updatePass stub called', [
+        Log::warning('DEPRECATED PassKitService::updatePass stub — see ClickUp 86d2y1txx', [
             'passkit_id' => $passkitId,
             'payload_keys' => array_keys($payload),
         ]);
@@ -2126,14 +2153,15 @@ class PassKitService
     }
 
     /**
-     * TODO: implement via $this->membershipClient->listMembers(\Members\ListRequest)
-     * with a date filter built from $since (ISO 8601). The SDK supports
-     * Filters but the exact date-field semantic depends on which
-     * timestamp PassKit indexes (createdAt vs updatedAt).
+     * @deprecated since v2.x — closest gRPC analog is
+     *   listMembers(\Members\ListRequest) with a Filters date predicate,
+     *   but the exact timestamp field PassKit indexes (createdAt vs
+     *   updatedAt) is unclear without PassKit-side guidance. Zero v2
+     *   callers. See https://app.clickup.com/t/86d2y1txx.
      */
     public function getMembersSince(string $since): array
     {
-        Log::warning('PassKitService::getMembersSince stub called — returning []', [
+        Log::warning('DEPRECATED PassKitService::getMembersSince stub — see ClickUp 86d2y1txx', [
             'since' => $since,
         ]);
 
