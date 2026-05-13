@@ -20,7 +20,9 @@ class PassKitApiController extends Controller
     public function health(): JsonResponse
     {
         $health = $this->crudManager->healthCheck();
-        return response()->json($health, $health['overall'] ? 200 : 503);
+        $overall = $health['overall'] ?? false;
+
+        return response()->json($health, $overall ? 200 : 503);
     }
 
     // Programs

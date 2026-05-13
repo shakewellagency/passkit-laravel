@@ -534,4 +534,15 @@ describe('PassKitCrudManager', function () {
             expect($result)->toBeFalse();
         });
     });
+
+    describe('Health Check', function () {
+        it('always returns an overall key so callers can branch safely', function () {
+            $health = $this->manager->healthCheck();
+
+            expect($health)
+                ->toHaveKey('overall')
+                ->and($health['overall'])->toBeBool()
+                ->and($health)->toHaveKeys(['database', 'passkit', 'timestamp']);
+        });
+    });
 });

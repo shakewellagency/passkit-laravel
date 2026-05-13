@@ -320,9 +320,12 @@ class PassKitCrudManager
             $dbOk = false;
         }
 
+        $passkitOk = (bool) $this->passKitService;
+
         return [
+            'overall' => $dbOk && $passkitOk,
             'database' => $dbOk ? 'ok' : 'error',
-            'passkit' => $this->passKitService ? 'configured' : 'missing',
+            'passkit' => $passkitOk ? 'configured' : 'missing',
             'timestamp' => now()->toISOString(),
         ];
     }
